@@ -1,0 +1,361 @@
+# YASGM (Yet Another Save Game Manager) — Design Document
+
+> **Living document.** Updated whenever a decision is made or the plan changes.
+> Last updated: 2026-07-19
+
+## Vision
+
+A setup-free tool that seamlessly syncs PC game saves across devices using the
+user's own cloud storage. The only setup step is authorizing a cloud service.
+Game save locations are discovered automatically — no per-game configuration.
+
+Target platforms: **Windows 10+**, **SteamOS (Steam Deck)**, **macOS** (native
+Steam games only; no Proton/CrossOver on Mac in scope).
+
+## Decisions log
+
+| # | Topic | Decision |
+|---|-------|----------|
+| D1 | Data scope | **Saves only** (no config/settings files). |
+| D2 | Steam Cloud games | Not synced. Instead they get **backup-only mode**: versioned snapshots taken automatically, **restore is manual only**, backup count configurable. |
+| D3 | Launchers | **Steam first**; library-provider abstraction so GOG/Epic/Heroic can be added later. |
+| D4 | Multi-account | Cloud namespace is **per Steam account ID** (two users on one machine never collide). |
+| D5 | Conflicts | **Keep both.** Latest becomes active; the other is preserved as a pinned version until the user deletes it manually (exempt from retention pruning). |
+| D6 | Language | **Rust.** |
+| D7 | Save-location data | Consume the **Ludusavi Manifest** (compiled from PCGamingWiki); do not scrape PCGW ourselves. Support `.ludusavi.yaml` secondary manifests later. |
+| D8 | Cloud providers | Modular provider trait. **OneDrive first** (native Microsoft Graph client, `Files.ReadWrite.AppFolder` scope, approot folder). No rclone dependency. |
+| D9 | Retention | Keep **last 10 versions** per game by default; **per-game override**; **warn when a game's stored data exceeds 1 GB**. Conflict-preserved and manually pinned versions are never auto-pruned. |
+| D10 | License | **MIT.** Attribute PCGamingWiki (manifest data derives from CC BY-NC-SA wiki content; data is fetched at runtime, not bundled). |
+| D11 | Daemon autostart | **Opt-in** (toggle offered after first successful cloud auth). |
+| D12 | Minimum OS | Windows 10+; current SteamOS; macOS 13+ (tentative). |
+| D13 | Data location | User chooses where local data (staging/backups) lives. See [Local data location](#local-data-location) for cloud-folder caveats. State DB always stays outside cloud-synced folders. |
+| D14 | Non-destructive | Hard rule: never delete/overwrite a local file without first capturing it in a snapshot. Deletes propagate as tombstones only. |
+| D15 | Per-game control | `mode: sync | backup-only | off` per game. Default: `sync`; auto-downgraded to `backup-only` when Steam Cloud is detected. |
+| D16 | Apple Developer signing | Deferred — ship unsigned macOS builds initially. |
+| D17 | Name | **"Yet another save game manager" (YASGM)** (decided 2026-07-17, replacing earlier *Bonfire* pick). Binary `yasgm`, OneDrive folder `Apps/YASGM/`, wrapper `yasgm run -- %command%`. Availability checked 2026-07-17: no crates.io crate, no GitHub project with the name — fully free. |
+
+## Open questions
+
+- **Azure app registration** — create under the owner's Microsoft account
+  before Phase 1 OneDrive work (free, no subscription; produces the client ID
+  embedded in the app). Display name: **YASGM** (shows on consent screen and
+  names the OneDrive `Apps/YASGM/` folder).
+- **GUI framework** — leaning Tauri v2 for the management UI (see
+  [UI plan](#ui-plan)); confirm before Phase 4.
+
+## Research summary (2026-07-17)
+
+### Existing tools and how they solved configuration
+
+- **Ludusavi** (Rust, Steam Deck support): state of the art for *discovery*.
+  Uses the Ludusavi Manifest (19k+ games scraped from PCGamingWiki +
+  Steam API), auto-detects Steam/GOG/Epic/Heroic/Lutris libraries, resolves
+  Proton prefixes. Cloud support shells out to user-configured rclone —
+  backup-oriented, not seamless sync.
+- **OpenCloudSaves** (Go): closest product vision (bi-directional cloud sync,
+  bundled rclone, Flathub for Deck) but uses hand-curated save definitions —
+  the setup burden we want to eliminate.
+- **GameSave Manager**: Windows-only, closed source, centrally maintained DB.
+- **decky-cloud-save**: Deck plugin over rclone, manual per-game paths.
+- **Steam Cloud**: zero-config baseline, but developer opt-in only. Our value
+  is covering the rest — and not fighting Valve's sync where it exists.
+
+Pattern: everyone converged on PCGamingWiki as ground truth; winners automate
+ingestion.
+
+### PCGamingWiki feasibility
+
+- PCGW Cargo API exposes metadata (Steam AppID, cloud-sync booleans) but **not
+  save paths** — those live in `{{Game data/saves}}` wikitext templates, so
+  direct extraction means parsing wikitext via the MediaWiki API. Doable but
+  a permanent maintenance burden; PCGW asks scrapers to be gentle.
+- **Ludusavi Manifest already does this**: single YAML
+  (`https://raw.githubusercontent.com/mtkennerly/ludusavi-manifest/master/data/manifest.yaml`),
+  ETag-based update checks, placeholders (`<winAppData>`, `<winDocuments>`,
+  `<xdgData>`, `<home>`, `<storeUserId>`, …) with per-OS/store `when:`
+  constraints. Repo is MIT; wiki content CC BY-NC-SA — fine for MIT
+  open-source with attribution since we fetch at runtime.
+- Coverage: excellent for popular titles; treat paths as "probable", never as
+  authority to delete anything (see D14).
+
+## Architecture
+
+### Components
+
+```
+┌─ CLI / GUI / tray ────────────────────────────────┐
+├─ Sync engine (versioning, conflicts, retention)   │
+├─ Game discovery: Library provider trait (Steam)   │
+├─ Path resolver (placeholders → OS/Proton paths)   │
+├─ Detection: FS watch + running-game + wrapper     │
+├─ Manifest service (fetch, cache, ETag)            │
+├─ Cloud provider trait (OneDrive first)            │
+└─ State DB (rusqlite) + local staging              │
+```
+
+### Cloud provider trait
+
+Minimal surface: `authorize()`, `list(prefix)`, `download(path)`,
+`upload(path, bytes)`, `delete(path)`, change-token/etag support. Everything
+above it is provider-agnostic.
+
+**OneDrive**: Microsoft Graph, `Files.ReadWrite.AppFolder` scope →
+app-sandboxed `Apps/<AppName>/` folder via `/me/drive/special/approot`.
+Auth: OAuth2 PKCE with localhost redirect (desktop) + **device-code flow**
+fallback (Steam Deck Gaming Mode: enter code on phone). Public client, no
+secret; client ID from a free Entra ID (Azure) app registration owned by the
+project owner. Registration's display name = consent-screen name = OneDrive
+folder name, so it couples to the project name.
+
+A **LocalFolder provider** (user points at any directory, e.g. a
+Syncthing-synced or cloud-client-synced folder) is cheap to add and covers
+power users — see caveats under [Local data location](#local-data-location).
+
+### Cloud data layout (versioned, per Steam account)
+
+```
+approot/
+  accounts/<steam-account-id>/
+    games/<steam-appid>/
+      index.json                      # versions, hashes, machine, OS, tombstones, pins
+      versions/
+        2026-07-17T21-04-11Z_deck1.zip
+        2026-07-16T09-30-02Z_pc.zip
+```
+
+- One zip per snapshot: atomic, restore-friendly, low Graph request count.
+  Files stored inside zips under **placeholder-relative paths** (e.g.
+  `winAppData/Studio/Game/slot1.sav`) so a Windows snapshot restores into a
+  Proton prefix on SteamOS and vice versa.
+- Snapshot skipped when content hashes are unchanged.
+- Retention per D9; conflict/pinned versions exempt (D5).
+
+### Path resolution
+
+- Windows: `<winAppData>` → `%APPDATA%`, etc. (Known Folder API).
+- SteamOS/Linux native: `<xdgData>`, `<home>` directly.
+- SteamOS Proton: Windows placeholders map into
+  `steamapps/compatdata/<AppID>/pfx/drive_c/users/steamuser/...`.
+- macOS: `<home>/Library/Application Support/...` (manifest `mac` constraints).
+- Steam library enumeration: `libraryfolders.vdf` + `appmanifest_*.acf` →
+  installed AppIDs joined against manifest Steam IDs.
+
+### Steam Cloud detection (→ backup-only mode, D2/D15)
+
+1. `appinfo.vdf` `ufs` section (developer-declared cloud save config).
+2. Fallback heuristic: `userdata/<accountid>/<appid>/remotecache.vdf` exists.
+3. Cross-check: PCGW Cargo cloud booleans.
+User can force any mode per game.
+
+### Game start/stop detection (layered)
+
+1. **FS watching (backbone)**: `notify` crate on resolved save dirs
+   (ReadDirectoryChangesW / inotify / FSEvents), debounced until writes settle.
+   Catches every launch method, zero setup.
+2. **Steam running-app polling**: Windows `HKCU\Software\Valve\Steam\RunningAppID`;
+   Linux `~/.steam/registry.vdf` `RunningAppID`. Gates uploads (prefer
+   after-exit) and triggers down-sync checks. Known unreliable per-game →
+   layers 3/4.
+3. **Process watching**: `appmanifest` install dir → running executables
+   (`sysinfo`).
+4. **Launch wrapper (opt-in per game)**: `yasgm run -- %command%` in Steam
+   launch options — guaranteed down-sync before launch, up-sync after exit.
+   Never auto-edit `localconfig.vdf` (Steam overwrites it).
+
+Default flow: daemon down-syncs at startup and periodically while idle; FS
+watcher detects save changes; upload after confirmed exit or settle timeout.
+Mid-session snapshots are safe (additive versions, never overwrites).
+
+### Sync & conflict semantics
+
+- Three-state comparison (local vs last-synced vs cloud) via state DB.
+- Newest snapshot wins as active; true conflicts produce two versions, loser
+  pinned until manual deletion (D5), with a notification.
+- Restore always snapshots current local state first → restore is reversible.
+- Dry-run mode; human-readable sync log.
+
+### Local data location
+
+User-configurable (D13). If the user places the data/backup folder inside a
+cloud-client-synced folder (OneDrive/Dropbox/Google Drive desktop client,
+Syncthing):
+
+- **Double-sync hazard**: don't point the API-based provider *and* a desktop
+  sync client at overlapping data — duplication and conflict churn.
+- **No completion signal**: the tool can't know when the desktop client has
+  finished uploading (e.g. before shutdown).
+- **Partial reads**: client may sync a file mid-write → always write
+  `tmp + atomic rename`; single-zip snapshots make torn reads near-impossible.
+- **Files On-Demand placeholders**: reads may stall on download; no official
+  OneDrive client on SteamOS at all.
+- **Conflict copies**: desktop clients create `file (conflicted copy)` litter;
+  treat the folder as eventually-consistent, ignore foreign files.
+- **State DB (SQLite) must never live in a cloud-synced folder** — corruption
+  risk. Keep it in the platform app-data dir unconditionally.
+
+This is also exactly the design of the LocalFolder provider, which turns these
+caveats into a supported feature.
+
+## Auto-update
+
+- **SteamOS**: Flathub only — Flatpak handles updates; the app must *not*
+  self-update inside the sandbox.
+- **Windows** (and macOS later): GitHub Releases + the `self_update` crate;
+  check on start (opt-out), notify + one-click apply, verify release signatures
+  (minisign/ed25519), atomic binary swap. Also publish to winget/scoop
+  (and Homebrew later) for users who prefer package managers.
+
+## UI plan
+
+Phased:
+
+1. **CLI** (Phase 1): `sync`, `restore`, `versions`, `games` (list/enable/
+   disable/mode), `auth`, `status`, `doctor` (path-resolution report).
+2. **Tray/menu-bar** (Phase 3): `tray-icon` + native notifications; status,
+   pause, "sync now".
+3. **Management GUI** (Phase 4): version browser/restore, per-game settings.
+   Options considered:
+   - **Tauri v2** (webview + Rust backend) — fastest path to a polished,
+     gamepad-friendly UI; heavier build. *Current lean.*
+   - **iced** (pure Rust; what Ludusavi uses) — no webview, more UI labor.
+   - **egui** — quickest to build, utilitarian look.
+   - Local web UI served by the daemon — works in Deck desktop browser, no
+     extra window toolkit.
+4. **Decky plugin** (v2, later): Gaming Mode status/controls on Steam Deck.
+
+## Rust stack
+
+`tokio`, `reqwest` (Graph), `oauth2` (PKCE + device code), `serde_yaml`
+(manifest), `keyvalues-parser` + binary-VDF parsing (`appinfo.vdf`), `notify`,
+`sysinfo`, `rusqlite`, `zip`, `self_update`, `tray-icon`. GUI: Tauri v2 or
+iced (open question).
+
+## Phases & estimates (~10–12 weeks total)
+
+- **Phase 0 — Spike: DONE 2026-07-19.** `yasgm doctor` (src/: `manifest.rs`,
+  `steam.rs`, `resolve.rs`, `vdf.rs`) downloads the manifest with ETag caching,
+  enumerates Steam libraries, resolves save paths per OS (incl. Proton mapping
+  code for Linux), detects Steam Cloud, and prints a per-game mode report.
+  Validated on macOS against a real library. Findings:
+  - Manifest is bigger than advertised: **16.6 MB, 52,822 games, 48,591 with
+    Steam IDs** (README says 19k+). serde_yaml parses it in ~1 s.
+  - **Manifest carries `cloud.steam` flags** — Steam Cloud detection works from
+    manifest + local `remotecache.vdf` heuristic; binary `appinfo.vdf` parsing
+    is likely unnecessary (demoted from Phase 1 TODO to optional).
+  - Data-quality confirmation: Divinity: Original Sin 2 has a native Mac build
+    but the manifest lists only a Windows save path → macOS-native coverage
+    will lag Windows. Windows+Proton covers the same rule on Deck; for Mac,
+    contribute missing paths to PCGamingWiki as encountered.
+  - Rust installed on dev machine via Homebrew rustup
+    (`/opt/homebrew/opt/rustup/bin` must be on PATH).
+- **Phase 1 — Core engine (~3 wks)**: IN PROGRESS. Done 2026-07-19:
+  - `yasgm auth` (PKCE + localhost loopback, `--device` fallback, token cache
+    with refresh, 0600) and `yasgm status` — verified live against a real
+    OneDrive; `Apps/YASGM/` folder created.
+  - **Snapshot store**: `snapshot.rs` (zip capture/extract; entries grouped
+    under per-root "mounts" recording the path template + captured wildcard
+    value, so zips restore cross-OS; `@file` sentinel for single-file roots;
+    deterministic content hash for unchanged-detection), `store.rs` (cloud
+    layout `accounts/<acct>/games/<appid>/{index.json,versions/*.zip}`,
+    retention keeping newest N non-pinned, 1 GB warning), Graph file ops in
+    `onedrive.rs` (download via pre-authorized URL, simple + chunked
+    resumable uploads, delete).
+  - Commands: `backup [appid] [--dry-run]`, `versions [appid]`,
+    `restore <appid> [--version <id>] [--dry-run]` (restore first preserves
+    current local state as a new version — D14), hidden `selftest` doing a
+    full cloud roundtrip (capture→upload→dedupe→mutate→upload→delete local→
+    restore→verify→cleanup) — **passed against real OneDrive**, and real
+    DOS2 Definitive Edition saves backed up from macOS.
+  - **Finding/fix**: multiple manifest entries can share one Steam AppID
+    (DOS2 base + Definitive Edition are both 435150). Entries are now merged
+    (union of file rules, OR of cloud flags) deterministically; before the
+    fix, HashMap ordering made doctor/backup pick different entries.
+  - **Sync engine** (`sync.rs`): three-state comparison (local capture vs
+    per-machine state vs cloud head). The **active head is the newest
+    non-pinned version**; pinned versions are preserved archives that never
+    compete for "latest" — this is what makes safety-preservation and D5
+    conflict-keeping immune to download/restore ping-pong loops. Conflict
+    flow: pin old head, upload local as new head, tell the user the `rm`
+    command for manual deletion (D5). Restore re-publishes restored content
+    as the new head so sync doesn't undo it. Backup-only games upload
+    normally but only report (never auto-download) a newer cloud head.
+  - **Per-game config** (`config.json`): `mode: auto|sync|backup|off` +
+    `keep` count — `yasgm config` command (D15, D9). Per-machine sync state
+    in `state.json` (deviation from plan: JSON instead of rusqlite — enough
+    until file-level tracking arrives with the daemon).
+  - Commands added: `sync [appid] [--dry-run]`, `config`, `pin`, `unpin`,
+    `rm`. Selftest extended with a sync-matrix section (InSync → Uploaded →
+    Conflict-with-pinning → Downloaded) — **passes against real OneDrive**;
+    real-library `sync` runs correctly (DOS2 in sync; repeat runs stable).
+  Remaining in Phase 1: quota-error handling polish, Windows validation of
+  the whole flow.
+- **Phase 2 — SteamOS + macOS resolution (~2–2.5 wks)**: Proton path mapping,
+  cross-OS normalization, macOS path resolution, Flatpak packaging,
+  device-code auth polish.
+- **Phase 3 — Seamless daemon (~2–2.5 wks)**: FS watcher, running-game
+  detection, sync-on-exit orchestration, launch-wrapper mode, tray status,
+  opt-in autostart.
+- **Phase 4 — Polish & reach (~2–3 wks)**: management GUI, macOS packaging
+  (unsigned initially, D16), self-update, LocalFolder provider,
+  `.ludusavi.yaml` support, additional cloud providers.
+
+## Risks
+
+- Cross-OS path normalization edge cases (Wine profile quirks, case
+  sensitivity, `<storeUserId>` differing per machine). Mitigation: snapshot
+  everything; a bad mapping is a misplaced restore, never data loss.
+- Manifest inaccuracies for niche titles. Mitigation: non-destructive
+  semantics, per-game disable, `doctor` command surfacing resolved paths.
+- Detection gaps for oddball games. Mitigation: FS-watch backbone + opt-in
+  wrapper.
+- Graph API throttling. Mitigation: one zip per snapshot, ETag caching,
+  backoff.
+- PCGW licensing if ever commercialized (currently fine: MIT tool, runtime
+  data fetch, attribution).
+
+## Appendix: Azure app registration for OneDrive (one-time setup)
+
+Steps match the modern Entra portal (verified 2026-07). Free; no Azure
+subscription; **not** the Microsoft 365 Developer Program (skip that signup if
+offered).
+
+1. https://aka.ms/appregistrations (or portal.azure.com → "App registrations"),
+   sign in with the personal Microsoft account that will own the app. A free
+   "Default Directory" tenant is auto-created on first use.
+2. **+ New registration**: name `YASGM`; supported account types =
+   **"Any Entra ID Tenant + Personal Microsoft accounts"**; redirect URI:
+   platform **"Public client/native (mobile & desktop)"**, value
+   `http://localhost` (loopback PKCE). Register.
+3. **Authentication → Advanced settings → "Allow public client flows" = Yes**
+   → Save (enables device-code flow for Steam Deck Gaming Mode).
+4. **API permissions → Add a permission → Microsoft Graph → Delegated**:
+   `Files.ReadWrite.AppFolder` + `offline_access`. "Not granted" status is
+   expected — users consent individually at first sign-in; no admin consent.
+5. Copy **Application (client) ID** from Overview → goes into the code as the
+   public client ID (not a secret). Never create a client secret for this app.
+
+Auth endpoints at runtime: **`https://login.microsoftonline.com/consumers`**
+(NOT `/common` — requesting the AppFolder scope through `/common` fails with
+`server_error` for personal accounts; verified 2026-07-19). Scopes:
+`Files.ReadWrite.AppFolder offline_access`.
+
+Registered client ID (public, ships in binary):
+`a79772b2-0da9-4af5-bc70-0aed51abab0b`.
+
+Scope gotcha (verified): `Files.ReadWrite.AppFolder` cannot read `/me/drive`
+(drive metadata/quota is out of bounds) — all Graph calls must stay under
+`/me/drive/special/approot`. Quota warnings must rely on upload errors
+(507/insufficient storage) rather than proactive quota reads.
+
+## Sources
+
+- https://github.com/mtkennerly/ludusavi
+- https://github.com/mtkennerly/ludusavi-manifest
+- https://github.com/mtkennerly/ludusavi/blob/master/docs/help/cloud-backup.md
+- https://github.com/DavidDeSimone/OpenCloudSaves
+- https://github.com/GedasFX/decky-cloud-save
+- https://www.pcgamingwiki.com/wiki/PCGamingWiki:API
+- https://community.pcgamingwiki.com/topic/5071-retrieve-config-data-and-save-data-location-through-the-api/
+- https://learn.microsoft.com/en-us/graph/onedrive-sharepoint-appfolder
+- https://learn.microsoft.com/en-us/onedrive/developer/rest-api/concepts/special-folders-appfolder?view=odsp-graph-online
+- https://steamcommunity.com/discussions/forum/1/1621726179573666840/

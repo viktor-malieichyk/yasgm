@@ -1,0 +1,21 @@
+[package]
+name = "yasgm"
+version = "0.1.0"
+edition = "2024"
+description = "Yet another save game manager — seamless cloud sync for PC game saves"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+dirs = "6"
+getrandom = "0.2"
+glob = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+time = "0.3"
+ureq = "2"
+url = "2"
+zip = "2"
