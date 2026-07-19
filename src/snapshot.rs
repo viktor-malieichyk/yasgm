@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::manifest::FileRule;
 use crate::resolve::{self, Os};
@@ -177,6 +177,11 @@ pub fn capture(
 /// Extract a snapshot zip onto this machine by re-resolving each mount's
 /// template. Never deletes local files; only writes/overwrites the files the
 /// snapshot contains (callers snapshot current state first — D14).
+///
+/// A mount can fail to resolve on this OS (e.g. a Linux-native mount from a
+/// snapshot captured on Linux, restored on Windows) — that's expected for
+/// cross-OS restores, not a fatal error, so such mounts are skipped rather
+/// than aborting the whole restore.
 pub fn extract(
     zip_bytes: &[u8],
     mounts: &[Mount],
@@ -186,6 +191,7 @@ pub fn extract(
 ) -> Result<u64> {
     let mut archive = ZipArchive::new(io::Cursor::new(zip_bytes))?;
     let mut written = 0u64;
+    let mut skipped_mounts: HashSet<String> = HashSet::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         if entry.is_dir() {
@@ -203,11 +209,23 @@ pub fn extract(
             .find(|m| m.mount == mount_id)
             .with_context(|| format!("snapshot references unknown mount {mount_id}"))?;
 
-        let resolved = resolve::resolve_template(&mount.template, os, game)
-            .with_context(|| format!("cannot resolve {} on this OS", mount.template))?;
+        let Some(resolved) = resolve::resolve_template(&mount.template, os, game) else {
+            if skipped_mounts.insert(mount_id.to_owned()) {
+                eprintln!("  skipping {mount_id} — cannot resolve {} on this OS", mount.template);
+            }
+            continue;
+        };
         let resolved = match (&mount.wildcard, resolved.contains('*')) {
             (Some(value), true) => resolved.replace('*', value),
-            (None, true) => bail!("unresolved wildcard in {} (no recorded value)", mount.template),
+            (None, true) => {
+                if skipped_mounts.insert(mount_id.to_owned()) {
+                    eprintln!(
+                        "  skipping {mount_id} — unresolved wildcard in {} (no recorded value)",
+                        mount.template
+                    );
+                }
+                continue;
+            }
             _ => resolved,
         };
 
