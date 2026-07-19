@@ -115,7 +115,12 @@ fn open_browser(url: &str) {
     let result = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).spawn()
     } else if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+        // `cmd /C start <url>` routes the URL through cmd.exe's own command
+        // parser, which treats `&` (ubiquitous in OAuth query strings) as a
+        // command separator and mangles quoting around the target/title
+        // arguments. Invoking explorer.exe directly hands the URL to
+        // CreateProcess as a single argument with no shell parsing at all.
+        std::process::Command::new("explorer").arg(url).spawn()
     } else {
         std::process::Command::new("xdg-open").arg(url).spawn()
     };
@@ -159,6 +164,7 @@ pub fn login_interactive() -> Result<Tokens> {
         ("code", code.as_str()),
         ("redirect_uri", redirect_uri.as_str()),
         ("code_verifier", verifier.as_str()),
+        ("scope", SCOPES),
     ])? {
         Ok(resp) => into_tokens(resp, None),
         Err(code) => bail!("sign-in failed: {code}"),
@@ -252,6 +258,7 @@ pub fn login_device() -> Result<Tokens> {
             ("client_id", CLIENT_ID),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", dc.device_code.as_str()),
+            ("scope", SCOPES),
         ])? {
             Ok(resp) => return into_tokens(resp, None),
             Err(code) => match code.as_str() {

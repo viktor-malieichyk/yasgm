@@ -5,8 +5,8 @@ storage. The only setup step is authorizing a cloud service — save locations
 for 50,000+ games are discovered automatically.
 
 > **Status: early development.** The core engine works (verified against a
-> real OneDrive and Steam library on macOS), but it has not shipped a
-> release yet. Windows and SteamOS validation is in progress. See
+> real OneDrive and Steam library on macOS and Windows), but it has not
+> shipped a release yet. SteamOS validation is in progress. See
 > [DESIGN.md](DESIGN.md) for the full design, decision log, and roadmap.
 
 ## How it works

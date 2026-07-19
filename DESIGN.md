@@ -1,7 +1,7 @@
 # YASGM (Yet Another Save Game Manager) — Design Document
 
 > **Living document.** Updated whenever a decision is made or the plan changes.
-> Last updated: 2026-07-19
+> Last updated: 2026-07-20
 
 ## Vision
 
@@ -287,8 +287,26 @@ iced (open question).
     `rm`. Selftest extended with a sync-matrix section (InSync → Uploaded →
     Conflict-with-pinning → Downloaded) — **passes against real OneDrive**;
     real-library `sync` runs correctly (DOS2 in sync; repeat runs stable).
-  Remaining in Phase 1: quota-error handling polish, Windows validation of
-  the whole flow.
+  - **Windows validation: DONE 2026-07-19.** `doctor`, `auth --device`, and
+    `selftest` (full 7-step cloud roundtrip incl. sync-matrix) verified
+    against a real OneDrive account and real Steam library on Windows
+    (aarch64). Build requires MSVC Build Tools (`link.exe`) **and** LLVM
+    `clang` (the `ring` crate needs it to assemble on aarch64-pc-windows-msvc
+    — not installed by the VC++ workload alone). Two auth bugs found and
+    fixed:
+    - `login_interactive`'s and `login_device`'s token-exchange requests
+      were missing the `scope` parameter (only `refresh()` had it) —
+      `/consumers` rejects the exchange with `AADSTS900144`.
+    - `open_browser`'s Windows branch shelled out to `cmd /C start "" <url>`;
+      cmd.exe's own parser splits unquoted `&` (ubiquitous in OAuth query
+      strings) into separate commands, and quoting the target still fought
+      `start`'s title/target argument ambiguity. Fixed by invoking
+      `explorer.exe <url>` directly, skipping cmd.exe's parser entirely.
+    - Separately observed (not a bug, environment-specific): in a sandboxed
+      command-execution context, a spawned browser can open in a session
+      invisible to the user — `auth --device` sidesteps this since it needs
+      no spawned browser at all, only a URL+code the user enters manually.
+  Remaining in Phase 1: quota-error handling polish.
 - **Phase 2 — SteamOS + macOS resolution (~2–2.5 wks)**: Proton path mapping,
   cross-OS normalization, macOS path resolution, Flatpak packaging,
   device-code auth polish.
