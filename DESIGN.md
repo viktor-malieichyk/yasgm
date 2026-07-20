@@ -316,9 +316,20 @@ iced (open question).
     instead of aborting via `?` mid-loop — which previously also skipped
     `state.save()`, silently losing progress already made earlier in that
     run. **Phase 1 complete.**
-- **Phase 2 — SteamOS + macOS resolution (~2–2.5 wks)**: Proton path mapping,
-  cross-OS normalization, macOS path resolution, Flatpak packaging,
-  device-code auth polish.
+- **Phase 2 — SteamOS + macOS resolution (~2–2.5 wks)**: IN PROGRESS.
+  - **Device-code auth polish: DONE 2026-07-20** (the only slice testable
+    from a Windows machine with no SteamOS/macOS/Linux hardware available —
+    the rest of this phase needs that hardware to validate against).
+    `login_device` now captures `expires_in` (defaulting to Entra's 900s if
+    the server omits it) as a local backstop alongside the server's own
+    `expired_token`, gives friendly terminal messages for expiry and
+    `authorization_declined` instead of a raw OAuth error code, and prints a
+    "still waiting…" ping every 30s so a long silent wait (switching devices
+    to sign in) doesn't look hung. Verified live: real device-code sign-in
+    on Windows showed pings at 30/60/90/120/150/180s then succeeded.
+  Remaining in Phase 2 (needs SteamOS/macOS/Linux hardware to validate):
+  Proton path mapping, cross-OS normalization, macOS path resolution,
+  Flatpak packaging.
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: FS watcher, running-game
   detection, sync-on-exit orchestration, launch-wrapper mode, tray status,
   opt-in autostart.

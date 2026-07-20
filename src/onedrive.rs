@@ -235,7 +235,13 @@ struct DeviceCodeResponse {
     message: Option<String>,
     #[serde(default)]
     interval: u64,
+    #[serde(default)]
+    expires_in: u64,
 }
+
+/// How often to remind the user we're still waiting, so a long silent wait
+/// (e.g. switching to a phone to sign in) doesn't look hung.
+const PING_EVERY_SECS: u64 = 30;
 
 /// Device-code sign-in (Steam Deck Gaming Mode, SSH sessions, …).
 pub fn login_device() -> Result<Tokens> {
@@ -252,8 +258,19 @@ pub fn login_device() -> Result<Tokens> {
     }
 
     let mut interval = dc.interval.max(1);
+    // Entra's default device-code lifetime is 900s; fall back to that if the
+    // server omits expires_in, so a local guard still exists as a backstop
+    // alongside the server's own expired_token error.
+    let deadline = if dc.expires_in > 0 { dc.expires_in } else { 900 };
+    let mut waited = 0u64;
+    let mut last_ping = 0u64;
     loop {
         sleep(Duration::from_secs(interval));
+        waited += interval;
+        if waited - last_ping >= PING_EVERY_SECS {
+            eprintln!("  still waiting for sign-in… ({waited}s elapsed)");
+            last_ping = waited;
+        }
         match token_request(&[
             ("client_id", CLIENT_ID),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -262,8 +279,12 @@ pub fn login_device() -> Result<Tokens> {
         ])? {
             Ok(resp) => return into_tokens(resp, None),
             Err(code) => match code.as_str() {
-                "authorization_pending" => continue,
+                "authorization_pending" if waited < deadline => continue,
+                "authorization_pending" | "expired_token" => bail!(
+                    "the code expired before sign-in completed — run `yasgm auth --device` again"
+                ),
                 "slow_down" => interval += 5,
+                "authorization_declined" => bail!("sign-in was declined"),
                 other => bail!("device sign-in failed: {other}"),
             },
         }
