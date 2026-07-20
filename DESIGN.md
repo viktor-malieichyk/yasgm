@@ -403,9 +403,34 @@ iced (open question).
     the initial sync pass in the log and the generated icon actually
     rendered in the real menu bar (confirmed via screenshot) next to the
     other status icons.
-- **Phase 4 — Polish & reach (~2–3 wks)**: management GUI, macOS packaging
-  (unsigned initially, D16), self-update, LocalFolder provider,
-  `.ludusavi.yaml` support, additional cloud providers.
+- **Phase 4 — Polish & reach (~2–3 wks)**: IN PROGRESS.
+  - **LocalFolder provider: DONE 2026-07-20.** Retrofitted D8's "modular
+    provider trait" (previously aspirational — `Store` called `onedrive::`
+    functions directly) into a real `Provider` trait (`src/provider.rs`:
+    `exists`/`download`/`upload`/`delete`); `Store` now holds
+    `Box<dyn Provider>`. `OneDriveProvider` (`src/onedrive.rs`) adapts the
+    existing Graph functions with no behavior change. New
+    `LocalFolderProvider` (`src/local.rs`) points at any directory —
+    formalizes the "Local data location" caveats already in this doc
+    (Syncthing- or desktop-client-synced folders as a sync target) —
+    writing via tmp-file-then-rename so nothing observes a partial write.
+    Global (not per-game) selection via `yasgm provider [onedrive|local
+    <path>|status]`, stored in `config.json` (`ProviderConfig`, defaults to
+    `Onedrive` so existing configs need no migration). `auth`/`status`
+    branch on the selected provider: local needs no sign-in, `status` does
+    a real directory + writability probe instead of a Graph call.
+    Unit-tested (`src/local.rs`): upload/download roundtrip through nested
+    paths, no leftover `.tmp` file, overwrite, idempotent delete. Verified
+    live: pointed the provider at a scratch folder, ran a real
+    `backup 435150` against actual DOS2 saves — cloud layout on disk
+    matched the documented `accounts/<id>/games/<appid>/{index.json,
+    versions/*.zip}` spec exactly — then `versions`, `sync` (reported in
+    sync), `pin`/`unpin`/`rm` (confirmed the zip was actually removed from
+    disk) all worked through the same CLI commands as OneDrive; reverted
+    the live config back to `onedrive` afterward.
+  Remaining in Phase 4: management GUI (framework still an open question),
+  macOS packaging (unsigned initially, D16), self-update, `.ludusavi.yaml`
+  support, additional cloud providers beyond OneDrive/LocalFolder.
 
 ## Risks
 

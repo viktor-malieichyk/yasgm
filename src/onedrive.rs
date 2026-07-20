@@ -459,3 +459,33 @@ pub fn delete(access_token: &str, rel: &str) -> Result<()> {
         Err(err) => Err(err).context("Graph unreachable"),
     }
 }
+
+/// Adapts the free functions above to the `Provider` trait so `Store` can
+/// treat OneDrive and LocalFolder interchangeably (D8).
+pub struct OneDriveProvider {
+    access_token: String,
+}
+
+impl OneDriveProvider {
+    pub fn new(access_token: String) -> OneDriveProvider {
+        OneDriveProvider { access_token }
+    }
+}
+
+impl crate::provider::Provider for OneDriveProvider {
+    fn exists(&self, rel: &str) -> Result<bool> {
+        Ok(item_get(&self.access_token, rel)?.is_some())
+    }
+
+    fn download(&self, rel: &str) -> Result<Vec<u8>> {
+        download(&self.access_token, rel)
+    }
+
+    fn upload(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        upload(&self.access_token, rel, bytes)
+    }
+
+    fn delete(&self, rel: &str) -> Result<()> {
+        delete(&self.access_token, rel)
+    }
+}

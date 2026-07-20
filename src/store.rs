@@ -14,7 +14,7 @@ use std::fs;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::onedrive;
+use crate::provider::Provider;
 use crate::snapshot::{Mount, Snapshot};
 
 pub const DEFAULT_KEEP: usize = 10;
@@ -44,7 +44,7 @@ pub struct Version {
 }
 
 pub struct Store {
-    access_token: String,
+    provider: Box<dyn Provider>,
     account: String,
 }
 
@@ -85,8 +85,8 @@ pub fn machine_name() -> String {
 }
 
 impl Store {
-    pub fn new(access_token: String, account: String) -> Store {
-        Store { access_token, account }
+    pub fn new(provider: Box<dyn Provider>, account: String) -> Store {
+        Store { provider, account }
     }
 
     fn game_base(&self, app_id: u64) -> String {
@@ -95,18 +95,16 @@ impl Store {
 
     pub fn load_index(&self, app_id: u64) -> Result<Option<Index>> {
         let rel = format!("{}/index.json", self.game_base(app_id));
-        match onedrive::item_get(&self.access_token, &rel)? {
-            None => Ok(None),
-            Some(_) => {
-                let bytes = onedrive::download(&self.access_token, &rel)?;
-                Ok(Some(serde_json::from_slice(&bytes).context("parsing index.json")?))
-            }
+        if !self.provider.exists(&rel)? {
+            return Ok(None);
         }
+        let bytes = self.provider.download(&rel)?;
+        Ok(Some(serde_json::from_slice(&bytes).context("parsing index.json")?))
     }
 
     fn save_index(&self, index: &Index) -> Result<()> {
         let rel = format!("{}/index.json", self.game_base(index.app_id));
-        onedrive::upload(&self.access_token, &rel, &serde_json::to_vec_pretty(index)?)
+        self.provider.upload(&rel, &serde_json::to_vec_pretty(index)?)
     }
 
     /// Active head: newest non-pinned version.
@@ -184,7 +182,7 @@ impl Store {
         };
 
         let zip_rel = format!("{}/versions/{id}.zip", self.game_base(app_id));
-        onedrive::upload(&self.access_token, &zip_rel, zip_bytes)?;
+        self.provider.upload(&zip_rel, zip_bytes)?;
         index.versions.push(version.clone());
         self.apply_retention(&mut index, keep)?;
         self.save_index(&index)?;
@@ -215,7 +213,7 @@ impl Store {
         let doomed: Vec<String> = unpinned.split_off(keep).into_iter().map(|(_, id)| id).collect();
         for id in &doomed {
             let zip_rel = format!("{}/versions/{id}.zip", self.game_base(index.app_id));
-            onedrive::delete(&self.access_token, &zip_rel)?;
+            self.provider.delete(&zip_rel)?;
         }
         index.versions.retain(|v| !doomed.contains(&v.id));
         Ok(())
@@ -244,13 +242,13 @@ impl Store {
             anyhow::bail!("version {version_id} not found");
         }
         let zip_rel = format!("{}/versions/{version_id}.zip", self.game_base(app_id));
-        onedrive::delete(&self.access_token, &zip_rel)?;
+        self.provider.delete(&zip_rel)?;
         index.versions.retain(|v| v.id != version_id);
         self.save_index(&index)
     }
 
     pub fn download_version(&self, app_id: u64, version: &Version) -> Result<Vec<u8>> {
         let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
-        onedrive::download(&self.access_token, &zip_rel)
+        self.provider.download(&zip_rel)
     }
 }

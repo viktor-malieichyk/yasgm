@@ -50,10 +50,28 @@ pub struct GameConfig {
     pub keep: Option<usize>,
 }
 
+/// Which cloud backend `Store` talks to (D8). Global, not per-game — the
+/// whole cloud layout (`accounts/<id>/games/<appid>/...`) lives under
+/// whichever provider is selected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ProviderConfig {
+    Onedrive,
+    Local { path: PathBuf },
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        ProviderConfig::Onedrive
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub games: HashMap<u64, GameConfig>,
+    #[serde(default)]
+    pub provider: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

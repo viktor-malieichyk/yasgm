@@ -4,8 +4,10 @@
 
 mod autostart;
 mod config;
+mod local;
 mod manifest;
 mod onedrive;
+mod provider;
 mod resolve;
 mod running;
 mod snapshot;
@@ -83,8 +85,21 @@ impl Ctx {
     }
 
     fn cloud_store(&self) -> Result<Store> {
-        let access_token = onedrive::ensure_access_token()?;
-        Ok(Store::new(access_token, self.account.clone()))
+        build_store(self.account.clone(), &config::Config::load())
+    }
+}
+
+/// Construct a `Store` over whichever provider (D8) the user has configured
+/// (`yasgm provider`); OneDrive unless a LocalFolder path is set.
+fn build_store(account: String, cfg: &config::Config) -> Result<Store> {
+    match &cfg.provider {
+        config::ProviderConfig::Onedrive => {
+            let access_token = onedrive::ensure_access_token()?;
+            Ok(Store::new(Box::new(onedrive::OneDriveProvider::new(access_token)), account))
+        }
+        config::ProviderConfig::Local { path } => {
+            Ok(Store::new(Box::new(local::LocalFolderProvider::new(path.clone())), account))
+        }
     }
 }
 
@@ -96,8 +111,8 @@ fn light_store() -> Result<(String, Store)> {
         .into_iter()
         .next()
         .context("no Steam account found in userdata")?;
-    let access_token = onedrive::ensure_access_token()?;
-    Ok((account.clone(), Store::new(access_token, account)))
+    let store = build_store(account.clone(), &config::Config::load())?;
+    Ok((account, store))
 }
 
 // ---- argument helpers -----------------------------------------------------
@@ -253,6 +268,13 @@ fn doctor() -> Result<()> {
 // ---- auth / status --------------------------------------------------------
 
 fn auth(args: &[String]) -> Result<()> {
+    if let config::ProviderConfig::Local { path } = config::Config::load().provider {
+        println!(
+            "cloud provider is a local folder ({}); no sign-in needed.",
+            path.display()
+        );
+        return Ok(());
+    }
     let tokens = if flag(args, "--device") {
         onedrive::login_device()?
     } else {
@@ -283,8 +305,54 @@ fn verify_cloud(access_token: &str) -> Result<()> {
 }
 
 fn status() -> Result<()> {
-    let access_token = onedrive::ensure_access_token()?;
-    verify_cloud(&access_token)
+    match config::Config::load().provider {
+        config::ProviderConfig::Onedrive => {
+            let access_token = onedrive::ensure_access_token()?;
+            verify_cloud(&access_token)
+        }
+        config::ProviderConfig::Local { path } => {
+            let meta = std::fs::metadata(&path)
+                .with_context(|| format!("{} not accessible", path.display()))?;
+            ensure!(meta.is_dir(), "{} is not a directory", path.display());
+            let probe = path.join(".yasgm-write-test");
+            std::fs::write(&probe, b"ok")
+                .with_context(|| format!("{} is not writable", path.display()))?;
+            let _ = std::fs::remove_file(&probe);
+            println!("Local folder provider ready: {}", path.display());
+            Ok(())
+        }
+    }
+}
+
+/// Select or inspect the cloud provider (D8).
+fn provider_cmd(args: &[String]) -> Result<()> {
+    let pos = positionals(args);
+    let mut cfg = config::Config::load();
+    match pos.first().map(String::as_str) {
+        Some("onedrive") => {
+            cfg.provider = config::ProviderConfig::Onedrive;
+            cfg.save()?;
+            println!("cloud provider set to OneDrive");
+        }
+        Some("local") => {
+            let raw = pos.get(1).context("usage: yasgm provider local <path>")?;
+            std::fs::create_dir_all(raw).with_context(|| format!("creating {raw}"))?;
+            let path = std::fs::canonicalize(raw)?;
+            cfg.provider = config::ProviderConfig::Local { path: path.clone() };
+            cfg.save()?;
+            println!("cloud provider set to local folder: {}", path.display());
+        }
+        None | Some("status") => match &cfg.provider {
+            config::ProviderConfig::Onedrive => println!("cloud provider: OneDrive"),
+            config::ProviderConfig::Local { path } => {
+                println!("cloud provider: local folder at {}", path.display())
+            }
+        },
+        Some(other) => {
+            anyhow::bail!("usage: yasgm provider [onedrive|local <path>|status] (got {other:?})")
+        }
+    }
+    Ok(())
 }
 
 // ---- sync -----------------------------------------------------------------
@@ -993,7 +1061,10 @@ fn selftest() -> Result<()> {
     );
 
     let access_token = onedrive::ensure_access_token()?;
-    let store = Store::new(access_token.clone(), "selftest".to_owned());
+    let store = Store::new(
+        Box::new(onedrive::OneDriveProvider::new(access_token.clone())),
+        "selftest".to_owned(),
+    );
 
     println!("1/7 capture + upload…");
     let snap = snapshot::capture(&files, &game, os)?.context("capture found nothing")?;
@@ -1122,6 +1193,7 @@ fn main() -> Result<()> {
         Some("run") => run_cmd(&args),
         Some("watch") => watch_cmd(&args),
         Some("autostart") => autostart_cmd(&args),
+        Some("provider") => provider_cmd(&args),
         Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
@@ -1137,6 +1209,7 @@ fn main() -> Result<()> {
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
                  watch [--settle <secs>] [--tray]\n  autostart [on|off|status]\n  \
+                 provider [onedrive|local <path>|status]\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
