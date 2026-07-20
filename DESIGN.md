@@ -356,7 +356,8 @@ iced (open question).
     natively on macOS. Remaining macOS work is packaging only (Phase 4).
   Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
   Proton path mapping, cross-OS normalization, Flatpak packaging.
-- **Phase 3 — Seamless daemon (~2–2.5 wks)**: IN PROGRESS.
+- **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
+  macOS; Linux paths written but unvalidated per 2026-07-20 direction).
   - **Launch-wrapper mode: DONE 2026-07-20.** `yasgm run [--app <id>] --
     <command…>`: pre-launch sync → run game (stdio inherited) → post-exit
     sync → child's exit code propagated. AppID comes from `--app` or Steam's
@@ -385,8 +386,23 @@ iced (open question).
   - Per user direction 2026-07-20: **proceed on Windows+macOS only**; all
     Linux code paths are written and kept current but unvalidated until
     hardware is available.
-  Remaining in Phase 3: tray status, opt-in autostart (D11), daemonization
-  (background service / login item).
+  - **Tray status + opt-in autostart: DONE 2026-07-20.** `watch --tray`
+    (`src/tray.rs`, Windows + macOS via `tao`/`tray-icon`; Linux tray
+    deferred — needs GTK stack) runs the watch loop on a worker thread and
+    the OS event loop on the main thread, with a generated dot icon (no
+    bundled assets) and a menu (status line + Sync now / Pause / Quit)
+    wired to the loop via new `WatchCommand`/status `mpsc` channels.
+    `yasgm autostart [on|off|status]` (`src/autostart.rs`, D11): macOS
+    LaunchAgent plist (`~/Library/LaunchAgents/dev.yasgm.watch.plist`,
+    loaded immediately via `launchctl`), Windows HKCU `Run` key, Linux XDG
+    autostart `.desktop` entry (written, unvalidated) — all point at
+    `watch --tray` (headless `watch` on Linux). This also covers
+    daemonization: the login item *is* the background process, no separate
+    service framework needed. Verified live on macOS: `autostart status`
+    correctly reports off; `watch --tray` run for several seconds showed
+    the initial sync pass in the log and the generated icon actually
+    rendered in the real menu bar (confirmed via screenshot) next to the
+    other status icons.
 - **Phase 4 — Polish & reach (~2–3 wks)**: management GUI, macOS packaging
   (unsigned initially, D16), self-update, LocalFolder provider,
   `.ludusavi.yaml` support, additional cloud providers.

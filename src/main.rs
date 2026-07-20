@@ -2,6 +2,7 @@
 //! Commands: doctor, auth [--device], status, sync, backup, versions,
 //! restore, config, pin, unpin, rm.
 
+mod autostart;
 mod config;
 mod manifest;
 mod onedrive;
@@ -11,6 +12,7 @@ mod snapshot;
 mod steam;
 mod store;
 mod sync;
+mod tray;
 mod vdf;
 
 use std::collections::HashMap;
@@ -480,23 +482,52 @@ fn watch_roots(ctx: &Ctx, cfg: &config::Config) -> Vec<(u64, PathBuf)> {
     roots
 }
 
-/// Foreground daemon: FS-watch save dirs, debounce, and sync when a game's
-/// saves settle and the game isn't running (or as soon as it exits). The
-/// launch wrapper (`yasgm run`) remains the strongest guarantee; this covers
-/// unwrapped launches. Opt-in autostart (D11) comes with the tray later.
+/// Control messages from the tray (or any future UI) into the watch loop.
+enum WatchCommand {
+    SyncNow,
+    TogglePause,
+    Quit,
+}
+
+/// Daemon entry: headless by default, `--tray` adds a status icon with
+/// Sync now / Pause / Quit (Windows + macOS; Linux tray pending).
 fn watch_cmd(args: &[String]) -> Result<()> {
+    let settle = std::time::Duration::from_secs(
+        flag_value(args, "--settle").and_then(|s| s.parse().ok()).unwrap_or(10),
+    );
+    if flag(args, "--tray") {
+        #[cfg(any(windows, target_os = "macos"))]
+        return tray::tray_main(settle);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        eprintln!("tray is not supported on this OS yet; running headless watch");
+    }
+    watch_loop(settle, None, None)
+}
+
+/// FS-watch save dirs, debounce, and sync when a game's saves settle and the
+/// game isn't running (or as soon as it exits). The launch wrapper
+/// (`yasgm run`) remains the strongest guarantee; this covers unwrapped
+/// launches.
+fn watch_loop(
+    settle: std::time::Duration,
+    control: Option<std::sync::mpsc::Receiver<WatchCommand>>,
+    status: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<()> {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let settle = Duration::from_secs(
-        flag_value(args, "--settle").and_then(|s| s.parse().ok()).unwrap_or(10),
-    );
     const RESCAN_EVERY: Duration = Duration::from_secs(300);
+    let report = |line: &str| {
+        if let Some(tx) = &status {
+            let _ = tx.send(line.to_owned());
+        }
+    };
 
     let ctx = load_ctx()?;
     let cfg = config::Config::load();
 
     println!("initial sync pass…");
+    report("initial sync…");
     if let Err(err) = run_sync(None, false) {
         eprintln!("initial sync failed (will keep watching): {err:#}");
     }
@@ -512,17 +543,19 @@ fn watch_cmd(args: &[String]) -> Result<()> {
             eprintln!("cannot watch {}: {err}", path.display());
         }
     }
+    let n_games = roots.iter().map(|(id, _)| id).collect::<std::collections::HashSet<_>>().len();
     println!(
-        "watching {} paths across {} games (settle {}s); Ctrl-C to stop",
+        "watching {} paths across {n_games} games (settle {}s); Ctrl-C to stop",
         roots.len(),
-        roots.iter().map(|(id, _)| id).collect::<std::collections::HashSet<_>>().len(),
         settle.as_secs()
     );
+    report(&format!("watching {n_games} games"));
 
     let mut dirty: HashMap<u64, Instant> = HashMap::new();
     let mut detector = running::RunningDetector::new();
     let mut last_running = detector.poll(&ctx.root, &ctx.games);
     let mut last_rescan = Instant::now();
+    let mut paused = false;
 
     let handle_event = |event: notify::Result<notify::Event>,
                             dirty: &mut HashMap<u64, Instant>,
@@ -549,31 +582,70 @@ fn watch_cmd(args: &[String]) -> Result<()> {
             handle_event(event, &mut dirty, &roots);
         }
 
+        if let Some(control) = &control {
+            while let Ok(command) = control.try_recv() {
+                match command {
+                    WatchCommand::Quit => {
+                        report("stopped");
+                        return Ok(());
+                    }
+                    WatchCommand::TogglePause => {
+                        paused = !paused;
+                        println!("{}", if paused { "paused" } else { "resumed" });
+                        report(if paused { "paused" } else { "resumed — watching" });
+                    }
+                    WatchCommand::SyncNow => {
+                        report("syncing…");
+                        match run_sync(None, false) {
+                            Ok(()) => report("synced (manual)"),
+                            Err(err) => {
+                                eprintln!("manual sync failed: {err:#}");
+                                report("sync failed — see log");
+                            }
+                        }
+                        dirty.clear();
+                    }
+                }
+            }
+        }
+
         let running_now = detector.poll(&ctx.root, &ctx.games);
         if let Some(prev) = last_running {
-            if running_now != Some(prev) {
+            if running_now != Some(prev) && !paused {
                 println!("app {prev} exited — syncing");
-                if let Err(err) = run_sync(Some(prev), false) {
-                    eprintln!("sync after exit of {prev} failed: {err:#}");
+                report("game exited — syncing…");
+                match run_sync(Some(prev), false) {
+                    Ok(()) => report("synced after game exit"),
+                    Err(err) => {
+                        eprintln!("sync after exit of {prev} failed: {err:#}");
+                        report("sync failed — see log");
+                    }
                 }
                 dirty.remove(&prev);
             }
         }
         last_running = running_now;
 
-        let settled: Vec<u64> = dirty
-            .iter()
-            .filter(|(app_id, since)| {
-                since.elapsed() >= settle && running_now != Some(**app_id)
-            })
-            .map(|(app_id, _)| *app_id)
-            .collect();
-        for app_id in settled {
-            println!("saves settled for app {app_id} — syncing");
-            if let Err(err) = run_sync(Some(app_id), false) {
-                eprintln!("sync of {app_id} failed: {err:#}");
+        if !paused {
+            let settled: Vec<u64> = dirty
+                .iter()
+                .filter(|(app_id, since)| {
+                    since.elapsed() >= settle && running_now != Some(**app_id)
+                })
+                .map(|(app_id, _)| *app_id)
+                .collect();
+            for app_id in settled {
+                println!("saves settled for app {app_id} — syncing");
+                report("saves changed — syncing…");
+                match run_sync(Some(app_id), false) {
+                    Ok(()) => report("synced"),
+                    Err(err) => {
+                        eprintln!("sync of {app_id} failed: {err:#}");
+                        report("sync failed — see log");
+                    }
+                }
+                dirty.remove(&app_id);
             }
-            dirty.remove(&app_id);
         }
 
         // Pick up save dirs that didn't exist at startup (first-ever save).
@@ -591,6 +663,20 @@ fn watch_cmd(args: &[String]) -> Result<()> {
             }
             roots = fresh;
         }
+    }
+    Ok(())
+}
+
+/// Opt-in autostart at login (D11).
+fn autostart_cmd(args: &[String]) -> Result<()> {
+    match positionals(args).first().map(String::as_str) {
+        Some("on") => println!("{}", autostart::enable()?),
+        Some("off") => println!("{}", autostart::disable()?),
+        None | Some("status") => match autostart::status()? {
+            Some(detail) => println!("autostart: on ({detail})"),
+            None => println!("autostart: off"),
+        },
+        Some(other) => anyhow::bail!("usage: yasgm autostart [on|off|status] (got {other:?})"),
     }
     Ok(())
 }
@@ -1035,6 +1121,7 @@ fn main() -> Result<()> {
         Some("sync") => sync_cmd(&args),
         Some("run") => run_cmd(&args),
         Some("watch") => watch_cmd(&args),
+        Some("autostart") => autostart_cmd(&args),
         Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
@@ -1049,7 +1136,8 @@ fn main() -> Result<()> {
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 watch [--settle <secs>]\n  backup [appid] [--dry-run]\n  \
+                 watch [--settle <secs>] [--tray]\n  autostart [on|off|status]\n  \
+                 backup [appid] [--dry-run]\n  \
                  versions [appid]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \

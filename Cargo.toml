@@ -24,3 +24,7 @@ zip = "2"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tao = "0.35.3"
+tray-icon = "0.24.1"
