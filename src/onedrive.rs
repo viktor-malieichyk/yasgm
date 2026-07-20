@@ -354,6 +354,23 @@ const SIMPLE_UPLOAD_LIMIT: usize = 4_000_000;
 // Graph requires chunk sizes in multiples of 320 KiB; 10 MiB qualifies.
 const CHUNK: usize = 10_485_760;
 
+/// The AppFolder scope can't read `/me/drive` for proactive quota checks (see
+/// DESIGN.md's Azure appendix), so quota exhaustion is only detectable from a
+/// failed upload: Graph returns 507 Insufficient Storage. This marker type
+/// lets callers distinguish "OneDrive is full" from other upload failures
+/// (via `anyhow::Error::downcast_ref`) to stop a batch cleanly instead of
+/// dumping a raw Graph error per game.
+#[derive(Debug)]
+pub struct QuotaExceeded;
+
+impl std::fmt::Display for QuotaExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OneDrive is out of storage space")
+    }
+}
+
+impl std::error::Error for QuotaExceeded {}
+
 pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() <= SIMPLE_UPLOAD_LIMIT {
         return match ureq::put(&approot_url(rel, ":/content"))
@@ -362,6 +379,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
             .send_bytes(bytes)
         {
             Ok(_) => Ok(()),
+            Err(ureq::Error::Status(507, _)) => Err(QuotaExceeded.into()),
             Err(ureq::Error::Status(code, resp)) => {
                 bail!("upload {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
             }
@@ -377,6 +395,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
         .send_string(session_body)
     {
         Ok(resp) => serde_json::from_str(&resp.into_string()?)?,
+        Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
         Err(ureq::Error::Status(code, resp)) => {
             bail!("upload session for {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
         }
@@ -396,6 +415,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
             .send_bytes(&bytes[offset..end])
         {
             Ok(_) => {}
+            Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
             Err(ureq::Error::Status(code, resp)) => {
                 bail!("chunk {range} of {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
             }

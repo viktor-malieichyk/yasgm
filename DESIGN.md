@@ -248,7 +248,7 @@ iced (open question).
     contribute missing paths to PCGamingWiki as encountered.
   - Rust installed on dev machine via Homebrew rustup
     (`/opt/homebrew/opt/rustup/bin` must be on PATH).
-- **Phase 1 — Core engine (~3 wks)**: IN PROGRESS. Done 2026-07-19:
+- **Phase 1 — Core engine (~3 wks)**: DONE 2026-07-20.
   - `yasgm auth` (PKCE + localhost loopback, `--device` fallback, token cache
     with refresh, 0600) and `yasgm status` — verified live against a real
     OneDrive; `Apps/YASGM/` folder created.
@@ -306,7 +306,16 @@ iced (open question).
       command-execution context, a spawned browser can open in a session
       invisible to the user — `auth --device` sidesteps this since it needs
       no spawned browser at all, only a URL+code the user enters manually.
-  Remaining in Phase 1: quota-error handling polish.
+  - **Quota-error handling: DONE 2026-07-20.** Graph returns 507 Insufficient
+    Storage on quota exhaustion (the AppFolder scope can't read `/me/drive`
+    for a proactive check — see Azure appendix). `onedrive::upload` now
+    special-cases 507 across all three request sites (simple PUT, chunked
+    session creation, chunked PUT) into a distinct `QuotaExceeded` marker
+    error instead of a raw Graph JSON dump. `backup`/`sync`'s per-game loops
+    downcast for it and stop the batch with one clear, actionable message
+    instead of aborting via `?` mid-loop — which previously also skipped
+    `state.save()`, silently losing progress already made earlier in that
+    run. **Phase 1 complete.**
 - **Phase 2 — SteamOS + macOS resolution (~2–2.5 wks)**: Proton path mapping,
   cross-OS normalization, macOS path resolution, Flatpak packaging,
   device-code auth polish.

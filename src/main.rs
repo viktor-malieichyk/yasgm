@@ -314,7 +314,7 @@ fn sync_cmd(args: &[String]) -> Result<()> {
             .get(&ctx.account, game.app_id)
             .map(|s| s.last_hash.clone());
 
-        let (outcome, update) = sync::sync_game(
+        let (outcome, update) = match sync::sync_game(
             &store,
             &merged.files,
             game,
@@ -323,7 +323,19 @@ fn sync_cmd(args: &[String]) -> Result<()> {
             last_hash.as_deref(),
             keep,
             dry_run,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(e) if e.downcast_ref::<onedrive::QuotaExceeded>().is_some() => {
+                eprintln!(
+                    "{}: OneDrive is out of storage space — stopping sync here. Free up \
+                     space (or raise your plan), then run `yasgm sync` again to pick up \
+                     where this left off.",
+                    game.name
+                );
+                break;
+            }
+            Err(e) => return Err(e),
+        };
 
         match outcome {
             sync::Outcome::NothingAnywhere => {
@@ -408,16 +420,28 @@ fn backup_cmd(args: &[String]) -> Result<()> {
                     );
                     let _ = std::fs::remove_file(&snap.zip_path);
                 } else {
-                    let version =
-                        store.push(&game.name, game.app_id, &snap, ctx.os.name(), keep, false)?;
-                    println!(
-                        "{}: uploaded version {} ({} files, {})",
-                        game.name,
-                        version.id,
-                        version.files,
-                        human_bytes(version.size)
-                    );
-                    state.set(&ctx.account, game.app_id, &version.id, &version.content_hash);
+                    match store.push(&game.name, game.app_id, &snap, ctx.os.name(), keep, false) {
+                        Ok(version) => {
+                            println!(
+                                "{}: uploaded version {} ({} files, {})",
+                                game.name,
+                                version.id,
+                                version.files,
+                                human_bytes(version.size)
+                            );
+                            state.set(&ctx.account, game.app_id, &version.id, &version.content_hash);
+                        }
+                        Err(e) if e.downcast_ref::<onedrive::QuotaExceeded>().is_some() => {
+                            eprintln!(
+                                "{}: OneDrive is out of storage space — stopping backup here. \
+                                 Free up space (or raise your plan), then run `yasgm backup` \
+                                 again to pick up where this left off.",
+                                game.name
+                            );
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
