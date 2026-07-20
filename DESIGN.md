@@ -137,6 +137,29 @@ approot/
 - Steam library enumeration: `libraryfolders.vdf` + `appmanifest_*.acf` →
   installed AppIDs joined against manifest Steam IDs.
 
+### Local manifest overrides
+
+D7: the community Ludusavi Manifest (52k+ games from PCGamingWiki) is ground
+truth but not complete or always accurate — e.g. Divinity: Original Sin 2 has
+a native Mac build but the manifest only lists a Windows save path (Phase 0
+finding). A local file at the platform config dir's `yasgm/ludusavi.yaml`
+(same schema as the community manifest: game name → `files`/`steam`/`cloud`)
+lets a user patch this themselves instead of waiting on a PCGamingWiki edit
+to land upstream:
+
+- **New game name** → inserted outright, and joins the normal Steam-AppID
+  merge pool (so it behaves exactly like any other manifest entry from that
+  point on).
+- **Existing game name** → deep-merged into the community entry: `files`
+  unioned per template (the override's rule wins if the exact same template
+  string collides), `steam`/`cloud` replaced only if the override sets them.
+  This can *add or fix* a path but can't *remove* a bad one from the
+  community manifest — acceptable for the gaps seen so far, but a known
+  limitation.
+
+Absent by default (not an error); `doctor` hints at the file's path when an
+installed game isn't in the manifest at all.
+
 ### Steam Cloud detection (→ backup-only mode, D2/D15)
 
 1. `appinfo.vdf` `ufs` section (developer-declared cloud save config).
@@ -475,11 +498,36 @@ iced (open question).
     directly earlier (`config`, `pin`/`unpin`/`rm` against the LocalFolder
     provider test), and the IPC argument-naming convention (`appId` →
     `app_id`) was already proven live by `list_versions`/`restore_version`.
+  - **`.ludusavi.yaml` local manifest overrides (D7): DONE 2026-07-21.** See
+    [Local manifest overrides](#local-manifest-overrides) below for the
+    what/why/schema; implementation notes here. `manifest::load()` now also
+    reads an optional local file (`local_manifest_path()`: platform config
+    dir, `yasgm/ludusavi.yaml`; absent by default, not an error) in the
+    exact same `Manifest` schema as the community manifest and merges it in
+    via `merge_manifest`: a name matching an existing entry deep-merges
+    (`files` unioned per template, override's rule wins on a template
+    collision; `steam`/`cloud` replaced only when the override sets them —
+    a known limitation is there's no way to *remove* a bad primary file
+    rule this way, only add/replace by template key, which covers the
+    cases seen so far); a new name is just inserted and joins that AppID's
+    merge pool normally through the existing `steam_index`/`Ctx::merged_game`
+    path — no separate merge logic needed for the "two names, same AppID"
+    case, since that already existed for the DOS2 base/Definitive-Edition
+    situation. `doctor` prints a hint pointing at the override file path
+    when any installed game isn't in the manifest. Unit-tested
+    (`src/manifest.rs`): new name inserted, matching name unions files
+    without duplicating the entry, override steam ID replaces missing
+    metadata. Verified live: wrote a real override file adding a custom
+    save path to the installed Terraforming Mars entry and a wholly new
+    unlisted game with a Steam ID — `doctor` showed the new path under
+    Terraforming Mars, manifest total went from 52829→52830 games (one
+    new entry, not two, confirming the existing entry was extended rather
+    than duplicated) and 48598→48599 with Steam IDs (confirming the new
+    entry was indexed); reverted the file afterward.
   Remaining in Phase 4: decide whether/when to split the core crate into
   lib+bin for direct GUI linkage (currently shells out to the `yasgm`
   binary), macOS packaging (unsigned initially, D16), self-update,
-  `.ludusavi.yaml` support, additional cloud providers beyond
-  OneDrive/LocalFolder.
+  additional cloud providers beyond OneDrive/LocalFolder.
 
 ## Risks
 

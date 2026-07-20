@@ -262,6 +262,13 @@ fn doctor() -> Result<()> {
         "summary: {n_sync} sync, {n_backup} backup-only, {n_off} off, \
          {n_nodata} without save rules, {n_unknown} not in manifest"
     );
+    if n_unknown > 0 {
+        println!(
+            "hint: add entries for unlisted games to {} (same schema as the \
+             community manifest; see DESIGN.md's \"Local manifest overrides\")",
+            manifest::local_manifest_path()?.display()
+        );
+    }
     Ok(())
 }
 
