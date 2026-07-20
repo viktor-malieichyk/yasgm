@@ -41,6 +41,7 @@ yasgm auth [--device]      # one-time cloud sign-in (device flow for Steam Deck)
 yasgm doctor               # what games were found, where their saves are, what mode they get
 yasgm sync [appid]         # bidirectional sync (upload / download / conflict-keep-both)
 yasgm run [--app <id>] -- <command>   # launch wrapper: sync, run game, sync
+yasgm watch [--settle <secs>]         # daemon: auto-sync on save changes / game exit
 yasgm backup [appid]       # snapshot + upload only
 yasgm versions [appid]     # list cloud versions
 yasgm restore <appid> [--version <id>]

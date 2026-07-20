@@ -6,6 +6,7 @@ mod config;
 mod manifest;
 mod onedrive;
 mod resolve;
+mod running;
 mod snapshot;
 mod steam;
 mod store;
@@ -13,7 +14,7 @@ mod sync;
 mod vdf;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use config::ModeOverride;
@@ -99,7 +100,7 @@ fn light_store() -> Result<(String, Store)> {
 
 // ---- argument helpers -----------------------------------------------------
 
-const VALUED_FLAGS: [&str; 3] = ["--version", "--mode", "--keep"];
+const VALUED_FLAGS: [&str; 5] = ["--version", "--mode", "--keep", "--app", "--settle"];
 
 fn positionals(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -448,6 +449,162 @@ fn run_cmd(args: &[String]) -> Result<()> {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+// ---- watch (daemon) --------------------------------------------------------
+
+/// Existing on-disk save roots to watch, per eligible game.
+fn watch_roots(ctx: &Ctx, cfg: &config::Config) -> Vec<(u64, PathBuf)> {
+    let mut roots = Vec::new();
+    for game in &ctx.games {
+        if cfg.game(game.app_id).mode == ModeOverride::Off {
+            continue;
+        }
+        let Some(merged) = ctx.merged_game(game.app_id) else { continue };
+        for (template, rule) in &merged.files {
+            if !rule.is_save() {
+                continue;
+            }
+            let Some(res) = resolve::resolve_rule(template, rule, ctx.os, game) else { continue };
+            let Some(pattern) = res.path else { continue };
+            for root in resolve::existing_matches(&pattern) {
+                // Watch the parent so deletes/renames of the root itself are
+                // seen too; fall back to the root when there is no parent.
+                let watch = root.parent().map(Path::to_path_buf).unwrap_or(root);
+                if !roots.iter().any(|(id, p)| *id == game.app_id && *p == watch) {
+                    roots.push((game.app_id, watch));
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// Foreground daemon: FS-watch save dirs, debounce, and sync when a game's
+/// saves settle and the game isn't running (or as soon as it exits). The
+/// launch wrapper (`yasgm run`) remains the strongest guarantee; this covers
+/// unwrapped launches. Opt-in autostart (D11) comes with the tray later.
+fn watch_cmd(args: &[String]) -> Result<()> {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let settle = Duration::from_secs(
+        flag_value(args, "--settle").and_then(|s| s.parse().ok()).unwrap_or(10),
+    );
+    const RESCAN_EVERY: Duration = Duration::from_secs(300);
+
+    let ctx = load_ctx()?;
+    let cfg = config::Config::load();
+
+    println!("initial sync pass…");
+    if let Err(err) = run_sync(None, false) {
+        eprintln!("initial sync failed (will keep watching): {err:#}");
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = tx.send(event);
+    })?;
+    let mut roots = watch_roots(&ctx, &cfg);
+    for (_, path) in &roots {
+        use notify::Watcher;
+        if let Err(err) = watcher.watch(path, notify::RecursiveMode::Recursive) {
+            eprintln!("cannot watch {}: {err}", path.display());
+        }
+    }
+    println!(
+        "watching {} paths across {} games (settle {}s); Ctrl-C to stop",
+        roots.len(),
+        roots.iter().map(|(id, _)| id).collect::<std::collections::HashSet<_>>().len(),
+        settle.as_secs()
+    );
+
+    let mut dirty: HashMap<u64, Instant> = HashMap::new();
+    let mut detector = running::RunningDetector::new();
+    let mut last_running = detector.poll(&ctx.root, &ctx.games);
+    let mut last_rescan = Instant::now();
+
+    let handle_event = |event: notify::Result<notify::Event>,
+                            dirty: &mut HashMap<u64, Instant>,
+                            roots: &[(u64, PathBuf)]| {
+        let Ok(event) = event else { return };
+        for path in &event.paths {
+            for (app_id, root) in roots {
+                if path.starts_with(root) {
+                    if dirty.insert(*app_id, Instant::now()).is_none() {
+                        println!("change detected for app {app_id} ({})", path.display());
+                    }
+                }
+            }
+        }
+    };
+
+    loop {
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(event) => handle_event(event, &mut dirty, &roots),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        while let Ok(event) = rx.try_recv() {
+            handle_event(event, &mut dirty, &roots);
+        }
+
+        let running_now = detector.poll(&ctx.root, &ctx.games);
+        if let Some(prev) = last_running {
+            if running_now != Some(prev) {
+                println!("app {prev} exited — syncing");
+                if let Err(err) = run_sync(Some(prev), false) {
+                    eprintln!("sync after exit of {prev} failed: {err:#}");
+                }
+                dirty.remove(&prev);
+            }
+        }
+        last_running = running_now;
+
+        let settled: Vec<u64> = dirty
+            .iter()
+            .filter(|(app_id, since)| {
+                since.elapsed() >= settle && running_now != Some(**app_id)
+            })
+            .map(|(app_id, _)| *app_id)
+            .collect();
+        for app_id in settled {
+            println!("saves settled for app {app_id} — syncing");
+            if let Err(err) = run_sync(Some(app_id), false) {
+                eprintln!("sync of {app_id} failed: {err:#}");
+            }
+            dirty.remove(&app_id);
+        }
+
+        // Pick up save dirs that didn't exist at startup (first-ever save).
+        if last_rescan.elapsed() >= RESCAN_EVERY {
+            last_rescan = Instant::now();
+            let fresh = watch_roots(&ctx, &cfg);
+            for (app_id, path) in &fresh {
+                if !roots.iter().any(|(id, p)| id == app_id && p == path) {
+                    use notify::Watcher;
+                    match watcher.watch(path, notify::RecursiveMode::Recursive) {
+                        Ok(()) => println!("now watching {} (app {app_id})", path.display()),
+                        Err(err) => eprintln!("cannot watch {}: {err}", path.display()),
+                    }
+                }
+            }
+            roots = fresh;
+        }
+    }
+    Ok(())
+}
+
+/// Debug: show what the running-game detector sees right now.
+fn running_cmd() -> Result<()> {
+    let ctx = load_ctx()?;
+    let mut detector = running::RunningDetector::new();
+    match detector.poll(&ctx.root, &ctx.games) {
+        Some(id) => println!("running: {id}"),
+        None => println!("running: none"),
+    }
+    running::debug_dump(&ctx.games);
+    Ok(())
 }
 
 // ---- backup / versions / restore -----------------------------------------
@@ -877,6 +1034,8 @@ fn main() -> Result<()> {
         Some("status") => status(),
         Some("sync") => sync_cmd(&args),
         Some("run") => run_cmd(&args),
+        Some("watch") => watch_cmd(&args),
+        Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
         Some("restore") => restore_cmd(&args),
@@ -890,7 +1049,7 @@ fn main() -> Result<()> {
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 backup [appid] [--dry-run]\n  \
+                 watch [--settle <secs>]\n  backup [appid] [--dry-run]\n  \
                  versions [appid]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \

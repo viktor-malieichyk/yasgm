@@ -366,8 +366,27 @@ iced (open question).
     the game verbatim so game flags are never parsed as ours (unit-tested);
     verified live: pre/post sync around a stub game, env-based AppID
     detection, exit code 3 propagated.
-  Remaining in Phase 3: FS watcher, running-game detection, sync-on-exit
-  orchestration without the wrapper, tray status, opt-in autostart.
+  - **Watch daemon: DONE 2026-07-20.** `yasgm watch [--settle <secs>]`
+    (foreground for now): initial sync pass, FS-watches all resolved save
+    roots (`notify` crate), debounces changes, and syncs a game when its
+    saves settle **and it isn't running** — or immediately when it exits.
+    Rescans every 5 min for save dirs that didn't exist at startup.
+    Verified live on macOS: change during a running game deferred, synced
+    on exit; idle change synced after settle; test versions cleaned up.
+  - **Running-game detection** (`running.rs`), layered per design:
+    Windows `HKCU\...\RunningAppID` via winreg; Linux `~/.steam/registry.vdf`
+    (+ Flatpak path) — *written but unvalidated, per decision to defer Linux
+    testing*; process-scan fallback on all OSes (sysinfo: any process whose
+    exe is under a game's `steamapps/common/<installdir>`).
+    **Finding (2026-07-20): macOS registry.vdf has NO RunningAppID key** —
+    process scan is the *primary* macOS signal, not a fallback. (Test-lab
+    note: macOS SIP kills signed system binaries copied elsewhere — fake
+    game processes for testing must be compiled, not copied from /bin.)
+  - Per user direction 2026-07-20: **proceed on Windows+macOS only**; all
+    Linux code paths are written and kept current but unvalidated until
+    hardware is available.
+  Remaining in Phase 3: tray status, opt-in autostart (D11), daemonization
+  (background service / login item).
 - **Phase 4 — Polish & reach (~2–3 wks)**: management GUI, macOS packaging
   (unsigned initially, D16), self-update, LocalFolder provider,
   `.ludusavi.yaml` support, additional cloud providers.
