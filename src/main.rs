@@ -289,6 +289,10 @@ fn status() -> Result<()> {
 fn sync_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
+    run_sync(only, dry_run)
+}
+
+fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
     let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
     let cfg = config::Config::load();
@@ -379,6 +383,71 @@ fn sync_cmd(args: &[String]) -> Result<()> {
         state.save()?;
     }
     Ok(())
+}
+
+// ---- run (launch wrapper) --------------------------------------------------
+
+/// Split `run` arguments into (explicit app id, game command). Everything
+/// after `--` is the game command verbatim (game args may contain `--flags`
+/// of their own); without `--`, the command starts at the first token that
+/// isn't ours.
+fn parse_run_args(args: &[String]) -> (Option<u64>, Vec<String>) {
+    let mut app_id = None;
+    let mut i = 1; // skip "run"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--" => return (app_id, args[i + 1..].to_vec()),
+            "--app" => {
+                app_id = args.get(i + 1).and_then(|a| a.parse().ok());
+                i += 2;
+            }
+            _ => return (app_id, args[i..].to_vec()),
+        }
+    }
+    (app_id, Vec::new())
+}
+
+/// Steam launch options integration: `yasgm run -- %command%`.
+/// Sync before the game reads its saves, run it, sync after it exits.
+/// A failed sync never blocks the game from launching (worst case the user
+/// plays on local saves and the post-exit sync reconciles as a conflict —
+/// non-destructive either way).
+fn run_cmd(args: &[String]) -> Result<()> {
+    let (explicit_app, command) = parse_run_args(args);
+    anyhow::ensure!(
+        !command.is_empty(),
+        "usage: yasgm run [--app <appid>] -- <game command...>"
+    );
+    // Steam exports SteamAppId to the launched process tree.
+    let app_id = explicit_app
+        .or_else(|| std::env::var("SteamAppId").ok().and_then(|v| v.parse().ok()))
+        .or_else(|| std::env::var("SteamGameId").ok().and_then(|v| v.parse().ok()));
+
+    match app_id {
+        Some(id) => {
+            eprintln!("yasgm: pre-launch sync (app {id})…");
+            if let Err(err) = run_sync(Some(id), false) {
+                eprintln!("yasgm: pre-launch sync failed (launching anyway): {err:#}");
+            }
+        }
+        None => eprintln!(
+            "yasgm: no app id (no SteamAppId in environment and no --app flag) — \
+             launching without sync"
+        ),
+    }
+
+    let status = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .with_context(|| format!("launching {:?}", command[0]))?;
+
+    if let Some(id) = app_id {
+        eprintln!("yasgm: post-exit sync (app {id})…");
+        if let Err(err) = run_sync(Some(id), false) {
+            eprintln!("yasgm: post-exit sync failed: {err:#}");
+        }
+    }
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 // ---- backup / versions / restore -----------------------------------------
@@ -770,6 +839,36 @@ fn selftest() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::parse_run_args;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn run_args_with_separator_keeps_game_flags() {
+        let (app, cmd) = parse_run_args(&s(&["run", "--app", "42", "--", "game.exe", "--fullscreen", "--app"]));
+        assert_eq!(app, Some(42));
+        assert_eq!(cmd, s(&["game.exe", "--fullscreen", "--app"]));
+    }
+
+    #[test]
+    fn run_args_without_separator() {
+        let (app, cmd) = parse_run_args(&s(&["run", "game.exe", "--app", "7"]));
+        assert_eq!(app, None);
+        assert_eq!(cmd, s(&["game.exe", "--app", "7"]));
+    }
+
+    #[test]
+    fn run_args_empty_command() {
+        let (app, cmd) = parse_run_args(&s(&["run", "--app", "42"]));
+        assert_eq!(app, Some(42));
+        assert!(cmd.is_empty());
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -777,6 +876,7 @@ fn main() -> Result<()> {
         Some("auth") => auth(&args),
         Some("status") => status(),
         Some("sync") => sync_cmd(&args),
+        Some("run") => run_cmd(&args),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
         Some("restore") => restore_cmd(&args),
@@ -789,7 +889,8 @@ fn main() -> Result<()> {
             eprintln!(
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
-                 sync [appid] [--dry-run]\n  backup [appid] [--dry-run]\n  \
+                 sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
+                 backup [appid] [--dry-run]\n  \
                  versions [appid]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \

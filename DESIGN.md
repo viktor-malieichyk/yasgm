@@ -349,12 +349,25 @@ iced (open question).
     prefix mapping matches the standard `steamuser` convention. Can't be
     fully confirmed without real SteamOS/macOS hardware to run against,
     though.
-  Remaining in Phase 2 (needs SteamOS/macOS/Linux hardware to validate):
-  Proton path mapping, cross-OS normalization, macOS path resolution,
-  Flatpak packaging.
-- **Phase 3 — Seamless daemon (~2–2.5 wks)**: FS watcher, running-game
-  detection, sync-on-exit orchestration, launch-wrapper mode, tray status,
-  opt-in autostart.
+  - **macOS path resolution: VALIDATED 2026-07-20** on real hardware (the
+    dev Mac this repo started on): real DOS2 Definitive Edition saves
+    resolve, capture, sync (stable in-sync across runs), and dry-run-restore
+    correctly; selftest's full capture→upload→restore roundtrip runs
+    natively on macOS. Remaining macOS work is packaging only (Phase 4).
+  Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
+  Proton path mapping, cross-OS normalization, Flatpak packaging.
+- **Phase 3 — Seamless daemon (~2–2.5 wks)**: IN PROGRESS.
+  - **Launch-wrapper mode: DONE 2026-07-20.** `yasgm run [--app <id>] --
+    <command…>`: pre-launch sync → run game (stdio inherited) → post-exit
+    sync → child's exit code propagated. AppID comes from `--app` or Steam's
+    `SteamAppId`/`SteamGameId` env vars (set for `%command%` wrappers).
+    Sync failures never block the launch (worst case: post-exit conflict
+    flow reconciles, non-destructively). Everything after `--` is passed to
+    the game verbatim so game flags are never parsed as ours (unit-tested);
+    verified live: pre/post sync around a stub game, env-based AppID
+    detection, exit code 3 propagated.
+  Remaining in Phase 3: FS watcher, running-game detection, sync-on-exit
+  orchestration without the wrapper, tray status, opt-in autostart.
 - **Phase 4 — Polish & reach (~2–3 wks)**: management GUI, macOS packaging
   (unsigned initially, D16), self-update, LocalFolder provider,
   `.ludusavi.yaml` support, additional cloud providers.

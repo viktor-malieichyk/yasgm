@@ -40,6 +40,7 @@ for 50,000+ games are discovered automatically.
 yasgm auth [--device]      # one-time cloud sign-in (device flow for Steam Deck)
 yasgm doctor               # what games were found, where their saves are, what mode they get
 yasgm sync [appid]         # bidirectional sync (upload / download / conflict-keep-both)
+yasgm run [--app <id>] -- <command>   # launch wrapper: sync, run game, sync
 yasgm backup [appid]       # snapshot + upload only
 yasgm versions [appid]     # list cloud versions
 yasgm restore <appid> [--version <id>]
@@ -48,6 +49,19 @@ yasgm pin|unpin|rm <appid> <version-id>
 ```
 
 All state-changing commands accept `--dry-run`.
+
+### Steam integration (per game, optional)
+
+For guaranteed sync-before-play and sync-after-exit, set the game's Steam
+launch options (right-click the game → Properties → Launch Options) to:
+
+```
+yasgm run -- %command%
+```
+
+The game's AppID is picked up automatically from Steam's environment. A
+failed sync never blocks the game from launching — worst case you play on
+local saves and the next sync reconciles (keeping both sides on conflict).
 
 ## Building
 
