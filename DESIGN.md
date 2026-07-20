@@ -524,10 +524,76 @@ iced (open question).
     new entry, not two, confirming the existing entry was extended rather
     than duplicated) and 48598→48599 with Steam IDs (confirming the new
     entry was indexed); reverted the file afterward.
-  Remaining in Phase 4: decide whether/when to split the core crate into
-  lib+bin for direct GUI linkage (currently shells out to the `yasgm`
-  binary), macOS packaging (unsigned initially, D16), self-update,
-  additional cloud providers beyond OneDrive/LocalFolder.
+  - **Lib+bin split: deferred 2026-07-21.** Decided to keep the GUI
+    subprocess-based (shells out to the `yasgm` binary, parses `--json`
+    output/exit codes) rather than splitting the core crate into lib+bin
+    for direct linkage. Reasoning: nothing the GUI does today (versions,
+    restore, config, pin/rm — all fire-and-forget actions) is hurt by
+    process-spawn latency or string-parsed errors, while the split is real
+    API-design work (today's CLI functions interleave arg parsing,
+    `println!` formatting, and actual logic, so splitting means untangling
+    that, not just adding `pub`) that would also remove the current
+    isolation between the CLI and GUI binaries. Revisit when either
+    trigger condition shows up: (a) the GUI wants live progress during a
+    sync, which text-scraping a subprocess can't give cleanly, or (b)
+    macOS packaging forces resolving the binary-location question anyway
+    (`ui/src-tauri/src/lib.rs`'s `yasgm_path()` currently hard-codes a dev
+    build path with a PATH fallback, which won't survive being bundled
+    into a `.app`) — at that point the seam is being touched regardless,
+    so it's the natural point to reconsider.
+  - **macOS packaging (D16): DONE 2026-07-21** — unsigned, as decided.
+    `ui/scripts/build-sidecar.sh` builds the `yasgm` CLI in release mode and
+    copies it into `ui/src-tauri/binaries/yasgm-<host-triple>` under
+    Tauri's sidecar naming convention; wired as both `beforeDevCommand` and
+    `beforeBuildCommand` in `tauri.conf.json` so it's always fresh and
+    matches the current host without a manual step. `bundle.externalBin`
+    bundles it into the `.app`; the Rust backend
+    (`ui/src-tauri/src/lib.rs`) now invokes it via `tauri-plugin-shell`'s
+    `app.shell().sidecar("yasgm")` instead of the old dev-path-guessing
+    `Command::new`, which **resolves trigger (b) of the deferred lib+bin
+    split above without doing that split** — the binary-location problem
+    was the actual blocker, not linkage, and Tauri's sidecar mechanism
+    solves it directly. `bundle.macOS.signingIdentity: null` and
+    `minimumSystemVersion: "13.0"` (matching D12). Verified live:
+    `npm run tauri build` produced `YASGM.app` and `YASGM_0.1.0_aarch64.dmg`
+    under `target/release/bundle/`; confirmed `Contents/MacOS/yasgm` exists
+    inside the bundle; launched the built `.app` standalone (not via
+    `cargo`/`npm run dev`) and it loaded real Games/Versions data through
+    the bundled sidecar, proving the packaging — not just the dev-mode
+    path — actually works. **Caution for next time**: during this build, a
+    second copy of `YASGM.app` appeared at the real `/Applications`
+    (matching timestamps/file sizes exactly) that neither the command
+    history nor `bundle_dmg.sh` (read in full — it only symlinks
+    `Applications` inside the mounted DMG, standard drag-to-install UX, not
+    a real copy) explains; unified log search for the build window found
+    nothing either. Removed it and confirmed builds stay under
+    `target/release/bundle/` on a re-run, but the mechanism is still
+    unexplained — worth watching for a repeat next time this is built.
+  - **GUI: master-detail layout: DONE 2026-07-21.** Replaced the two
+    always-visible tables (Games, Versions) with a sidebar of games
+    (`#games-list`) and a detail panel (`#detail`) that shows the selected
+    game's settings (mode/keep, Save/Reset) and its versions only —
+    decluttering both the per-row column count (version rows now show a
+    human-formatted date, a colored active/pinned badge, and a compact
+    machine/OS/files/size subtitle instead of a raw version-id string and
+    six separate table columns) and the always-all-games flat version list
+    from before. First game auto-selected on load. No Rust/IPC changes —
+    `list_games`/`list_versions`/etc. are unchanged, only how `ui/src/*`
+    calls and renders them. Verified live: real Games/Versions data
+    rendered correctly in the new layout; a real accessibility-tree click
+    on a sidebar game correctly swapped the detail panel to that game's
+    settings and versions; zoomed screenshot confirmed the active version's
+    Restore/Delete render visibly washed-out (disabled) against the
+    non-active version's crisp enabled buttons; fixed a Keep-input
+    placeholder ("default (10)") getting clipped by the number spinner
+    (`.keep-input` width 5em → 7.5em), confirmed via hot-reload screenshot.
+    Also picked up incidentally: darker/more legible `prefers-color-scheme:
+    dark` colors for inputs/select/buttons/badges as part of the CSS
+    rewrite — not yet verified live against real dark mode (an earlier
+    attempt to toggle system dark mode for testing was interrupted; system
+    appearance was reverted to its original light setting and left alone).
+  Remaining in Phase 4: verify dark mode live, self-update, additional
+  cloud providers beyond OneDrive/LocalFolder.
 
 ## Risks
 
