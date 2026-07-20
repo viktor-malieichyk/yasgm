@@ -40,9 +40,6 @@ Steam games only; no Proton/CrossOver on Mac in scope).
   before Phase 1 OneDrive work (free, no subscription; produces the client ID
   embedded in the app). Display name: **YASGM** (shows on consent screen and
   names the OneDrive `Apps/YASGM/` folder).
-- **GUI framework** — leaning Tauri v2 for the management UI (see
-  [UI plan](#ui-plan)); confirm before Phase 4.
-
 ## Research summary (2026-07-17)
 
 ### Existing tools and how they solved configuration
@@ -214,13 +211,13 @@ Phased:
 2. **Tray/menu-bar** (Phase 3): `tray-icon` + native notifications; status,
    pause, "sync now".
 3. **Management GUI** (Phase 4): version browser/restore, per-game settings.
-   Options considered:
-   - **Tauri v2** (webview + Rust backend) — fastest path to a polished,
-     gamepad-friendly UI; heavier build. *Current lean.*
-   - **iced** (pure Rust; what Ludusavi uses) — no webview, more UI labor.
-   - **egui** — quickest to build, utilitarian look.
-   - Local web UI served by the daemon — works in Deck desktop browser, no
-     extra window toolkit.
+   **Decided: Tauri v2** (webview + Rust backend) — validated 2026-07-20 via
+   a minimal shell (`ui/`, see Phase 4 log) that opens a real window and
+   round-trips real cloud version data through IPC. Other options that were
+   considered: **iced** (pure Rust; what Ludusavi uses) — no webview, more
+   UI labor; **egui** — quickest to build, utilitarian look; local web UI
+   served by the daemon — works in Deck desktop browser, no extra window
+   toolkit.
 4. **Decky plugin** (v2, later): Gaming Mode status/controls on Steam Deck.
 
 ## Rust stack
@@ -428,9 +425,38 @@ iced (open question).
     sync), `pin`/`unpin`/`rm` (confirmed the zip was actually removed from
     disk) all worked through the same CLI commands as OneDrive; reverted
     the live config back to `onedrive` afterward.
-  Remaining in Phase 4: management GUI (framework still an open question),
-  macOS packaging (unsigned initially, D16), self-update, `.ludusavi.yaml`
-  support, additional cloud providers beyond OneDrive/LocalFolder.
+  - **GUI framework: Tauri v2 shell scaffolded 2026-07-20**, resolving the
+    open "UI plan" question in favor of Tauri v2. Lives in `ui/` (separate
+    `npm`/`cargo` project, scaffolded via `create-tauri-app`; `ui/src`
+    vanilla HTML/JS frontend, `ui/src-tauri` Rust backend, package/crate
+    both named `ui`) — deliberately outside the root Cargo package so it
+    doesn't affect the CLI's build. A minimal version browser: table of
+    cloud versions (game, id, machine, OS, files, size, active/pinned
+    marker) with a per-row Restore button. The Rust backend doesn't link
+    the core crate as a library yet (that's not split out from the `yasgm`
+    bin today) — it shells out to the built `yasgm` binary instead:
+    `list_versions` runs `yasgm versions [appid] --json` (new `--json`
+    flag added to `versions_cmd` in main.rs, emitting one JSON array;
+    status/progress text already went to stderr via `eprintln!`, so stdout
+    was already clean for parsing) and `restore_version` runs
+    `yasgm restore <appid> --version <id>`, surfacing its exit code/stderr
+    as the JS-side error. If this framework choice sticks, the natural next
+    step is splitting the core crate into lib+bin so the GUI can link it
+    directly instead of shelling out. Verified live: `npm run tauri dev`
+    opened a real window titled "YASGM — Version Browser" that loaded the
+    actual two cloud versions of DOS2 from the real OneDrive store through
+    the IPC → subprocess → `Store` path, correctly marking the active one
+    and disabling its Restore button (confirmed via screenshot). Did not
+    click-test Restore itself against the real save file — that code path
+    was already proven in Phase 1's `selftest` sync matrix, and clicking it
+    here would have durably swapped the real DOS2 cloud head to an older
+    save; not worth the risk to real data for what would be a redundant
+    check.
+  Remaining in Phase 4: fill out the GUI (per-game settings, config
+  editing, pin/unpin/rm, not just versions+restore), decide whether/when to
+  split the core crate into lib+bin for direct GUI linkage, macOS packaging
+  (unsigned initially, D16), self-update, `.ludusavi.yaml` support,
+  additional cloud providers beyond OneDrive/LocalFolder.
 
 ## Risks
 

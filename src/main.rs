@@ -834,20 +834,42 @@ fn backup_cmd(args: &[String]) -> Result<()> {
 
 fn versions_cmd(args: &[String]) -> Result<()> {
     let only = parse_app_id(args);
+    let json = flag(args, "--json");
     let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
+    let mut json_out = Vec::new();
 
     for game in ctx.games.iter().filter(|g| only.is_none_or(|id| id == g.app_id)) {
         let Some(index) = store.load_index(game.app_id)? else {
-            println!("{} ({}): no cloud versions", game.name, game.app_id);
+            if !json {
+                println!("{} ({}): no cloud versions", game.name, game.app_id);
+            }
             continue;
         };
-        println!("{} ({}):", game.name, game.app_id);
+        if !json {
+            println!("{} ({}):", game.name, game.app_id);
+        }
         let head_id = Store::head(&index).map(|h| h.id.clone());
         let mut versions = index.versions.clone();
         versions.sort_by(|a, b| b.created.cmp(&a.created));
         for v in versions {
-            let marker = if Some(&v.id) == head_id.as_ref() {
+            let active = Some(&v.id) == head_id.as_ref();
+            if json {
+                json_out.push(serde_json::json!({
+                    "app_id": game.app_id,
+                    "game": game.name,
+                    "id": v.id,
+                    "created": v.created,
+                    "machine": v.machine,
+                    "os": v.os,
+                    "files": v.files,
+                    "size": v.size,
+                    "pinned": v.pinned,
+                    "active": active,
+                }));
+                continue;
+            }
+            let marker = if active {
                 " [active]"
             } else if v.pinned {
                 " [pinned]"
@@ -863,6 +885,9 @@ fn versions_cmd(args: &[String]) -> Result<()> {
                 v.os
             );
         }
+    }
+    if json {
+        println!("{}", serde_json::to_string(&json_out)?);
     }
     Ok(())
 }
@@ -1211,7 +1236,7 @@ fn main() -> Result<()> {
                  watch [--settle <secs>] [--tray]\n  autostart [on|off|status]\n  \
                  provider [onedrive|local <path>|status]\n  \
                  backup [appid] [--dry-run]\n  \
-                 versions [appid]\n  restore <appid> [--version <id>] [--dry-run]\n  \
+                 versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \
                  rm <appid> <version-id>"

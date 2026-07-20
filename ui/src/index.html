@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YASGM</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <main class="container">
+      <h1>YASGM — Version Browser</h1>
+
+      <form class="row" id="load-form">
+        <input id="app-id-input" placeholder="Steam AppID (blank = all games)" />
+        <button type="submit">Load versions</button>
+      </form>
+
+      <table id="versions-table">
+        <thead>
+          <tr>
+            <th>Game</th>
+            <th>Version</th>
+            <th>Machine</th>
+            <th>OS</th>
+            <th>Files</th>
+            <th>Size</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="versions-body"></tbody>
+      </table>
+
+      <p id="status-msg"></p>
+    </main>
+  </body>
+</html>
