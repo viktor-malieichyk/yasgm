@@ -327,6 +327,28 @@ iced (open question).
     "still waiting…" ping every 30s so a long silent wait (switching devices
     to sign in) doesn't look hung. Verified live: real device-code sign-in
     on Windows showed pings at 30/60/90/120/150/180s then succeeded.
+  - **Wildcard-capture bugfix: DONE 2026-07-20** (found in a code review of
+    the cross-OS mount-resolution path; not Proton/macOS-specific, so
+    testable on Windows). `snapshot.rs`'s `wildcard_value` recorded the
+    *whole* matched path segment for a `*`-wildcard placeholder (e.g.
+    `<storeUserId>`), not just the substituted portion. That's correct only
+    when the wildcard fills a whole segment on its own; for a template that
+    embeds it inline (e.g. `Slot<storeUserId>Data`), it would capture the
+    entire segment, and restoring later would then do
+    `"Slot*Data".replace('*', "Slot76561198012345678Data")`, doubling the
+    literal text into a corrupted path instead of reconstructing the
+    original. Fixed to extract only the substring between the wildcard's
+    prefix/suffix. Added unit tests (`cargo test`) covering the full-segment
+    case, the embedded case, the capture→restore round-trip, and two
+    None-cases; `selftest`'s cloud roundtrip still passes.
+  - Code review of `resolve.rs`'s Proton and macOS placeholder logic
+    (`constraint_matches`, `applies_on`, `windows_only`, `native_vars`,
+    `proton_vars`) found no other bugs: macOS coverage is actually complete
+    as-is (the manifest writes mac paths directly as `<home>/Library/...`,
+    with no separate mac-only placeholders to be missing), and the Proton
+    prefix mapping matches the standard `steamuser` convention. Can't be
+    fully confirmed without real SteamOS/macOS hardware to run against,
+    though.
   Remaining in Phase 2 (needs SteamOS/macOS/Linux hardware to validate):
   Proton path mapping, cross-OS normalization, macOS path resolution,
   Flatpak packaging.

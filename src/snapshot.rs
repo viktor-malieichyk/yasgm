@@ -60,7 +60,13 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Where a pattern segment was `*`, return the segment the match actually had.
+/// Where a pattern segment contains `*`, return just the substring the
+/// wildcard matched — not the whole segment, since the wildcard (e.g.
+/// `<storeUserId>`, substituted as a bare `*`) may not occupy the full
+/// segment on its own (e.g. a template like `Slot<storeUserId>Data`).
+/// Returning the whole segment there would make the later
+/// `resolved.replace('*', value)` on restore double up the surrounding
+/// literal text instead of reconstructing the original path.
 fn wildcard_value(pattern: &str, matched: &Path) -> Option<String> {
     if !pattern.contains('*') {
         return None;
@@ -77,11 +83,13 @@ fn wildcard_value(pattern: &str, matched: &Path) -> Option<String> {
     if pattern_segments.len() != matched_segments.len() {
         return None;
     }
-    pattern_segments
-        .iter()
-        .zip(&matched_segments)
-        .find(|(p, _)| p.contains('*'))
-        .map(|(_, m)| (*m).to_owned())
+    for (p, m) in pattern_segments.iter().zip(&matched_segments) {
+        let Some((prefix, suffix)) = p.split_once('*') else { continue };
+        if let Some(value) = m.strip_prefix(prefix).and_then(|rest| rest.strip_suffix(suffix)) {
+            return Some(value.to_owned());
+        }
+    }
+    None
 }
 
 struct Entry {
@@ -247,4 +255,54 @@ pub fn extract(
         written += 1;
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_value_full_segment() {
+        let pattern = "C:/Users/X/Documents/MyGame/*/saves";
+        let matched = Path::new("C:/Users/X/Documents/MyGame/76561198012345678/saves");
+        assert_eq!(wildcard_value(pattern, matched), Some("76561198012345678".to_owned()));
+    }
+
+    #[test]
+    fn wildcard_value_embedded_in_segment() {
+        // The wildcard placeholder doesn't always occupy a whole path
+        // segment on its own (e.g. `Slot<storeUserId>Data`) — only the
+        // substituted portion should be captured, not the whole segment.
+        let pattern = "C:/Users/X/Documents/MyGame/Slot*Data/saves";
+        let matched = Path::new("C:/Users/X/Documents/MyGame/Slot76561198012345678Data/saves");
+        assert_eq!(wildcard_value(pattern, matched), Some("76561198012345678".to_owned()));
+    }
+
+    #[test]
+    fn wildcard_value_roundtrips_through_replace() {
+        // This mirrors what actually happens: capture records the value via
+        // wildcard_value, restore re-resolves the template (still containing
+        // the literal `*`) and reconstructs the path via `.replace('*', ..)`.
+        for (pattern, matched) in [
+            ("MyGame/*/saves", "MyGame/76561198012345678/saves"),
+            ("MyGame/Slot*Data/saves", "MyGame/Slot76561198012345678Data/saves"),
+        ] {
+            let value = wildcard_value(pattern, Path::new(matched)).expect("should capture a value");
+            assert_eq!(pattern.replace('*', &value), matched);
+        }
+    }
+
+    #[test]
+    fn wildcard_value_none_without_wildcard() {
+        let pattern = "C:/Users/X/Documents/MyGame/saves";
+        let matched = Path::new("C:/Users/X/Documents/MyGame/saves");
+        assert_eq!(wildcard_value(pattern, matched), None);
+    }
+
+    #[test]
+    fn wildcard_value_none_on_segment_count_mismatch() {
+        let pattern = "MyGame/*/saves";
+        let matched = Path::new("MyGame/saves");
+        assert_eq!(wildcard_value(pattern, matched), None);
+    }
 }
