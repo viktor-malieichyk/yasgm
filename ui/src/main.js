@@ -1,11 +1,25 @@
 const { invoke } = window.__TAURI__.core;
 
-let appIdInputEl;
-let versionsBodyEl;
-let gamesBodyEl;
+const MODES = ["auto", "sync", "backup", "off"];
+
+let gamesListEl;
+let detailEmptyEl;
+let detailContentEl;
+let detailTitleEl;
+let detailAppIdEl;
+let modeSelectEl;
+let keepInputEl;
+let saveBtnEl;
+let resetBtnEl;
+let versionsListEl;
 let statusMsgEl;
 
-const MODES = ["auto", "sync", "backup", "off"];
+let games = [];
+let selectedAppId = null;
+
+function setStatus(text) {
+  statusMsgEl.textContent = text;
+}
 
 function humanBytes(bytes) {
   if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
@@ -14,130 +28,146 @@ function humanBytes(bytes) {
   return `${bytes} B`;
 }
 
-function setStatus(text) {
-  statusMsgEl.textContent = text;
+function humanDate(unixSeconds) {
+  return new Date(unixSeconds * 1000).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
-// ---- games / per-game config ----------------------------------------------
+// ---- games sidebar ----------------------------------------------------
 
 async function loadGames() {
-  gamesBodyEl.innerHTML = "";
   try {
-    const games = await invoke("list_games");
-    for (const g of games) {
-      gamesBodyEl.appendChild(renderGameRow(g));
-    }
+    games = await invoke("list_games");
   } catch (err) {
     setStatus(`error loading games: ${err}`);
+    return;
+  }
+  renderGamesList();
+  if (selectedAppId === null && games.length > 0) {
+    selectGame(games[0].app_id);
+  } else if (selectedAppId !== null && games.some((g) => g.app_id === selectedAppId)) {
+    renderDetailSettings();
+  } else {
+    selectedAppId = null;
+    showEmptyDetail();
   }
 }
 
-function renderGameRow(g) {
-  const tr = document.createElement("tr");
+function renderGamesList() {
+  gamesListEl.innerHTML = "";
+  for (const g of games) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "game-item" + (g.app_id === selectedAppId ? " selected" : "");
+    item.innerHTML = `<span class="game-name">${g.game}</span><span class="muted">${g.app_id}</span>`;
+    item.addEventListener("click", () => selectGame(g.app_id));
+    gamesListEl.appendChild(item);
+  }
+}
 
-  const nameTd = document.createElement("td");
-  nameTd.textContent = g.game;
-  tr.appendChild(nameTd);
+function selectGame(appId) {
+  selectedAppId = appId;
+  renderGamesList();
+  renderDetailSettings();
+  loadVersions();
+}
 
-  const idTd = document.createElement("td");
-  idTd.textContent = g.app_id;
-  tr.appendChild(idTd);
+function showEmptyDetail() {
+  detailEmptyEl.classList.remove("hidden");
+  detailContentEl.classList.add("hidden");
+}
 
-  const modeTd = document.createElement("td");
-  const modeSelect = document.createElement("select");
+function renderDetailSettings() {
+  const g = games.find((game) => game.app_id === selectedAppId);
+  if (!g) {
+    showEmptyDetail();
+    return;
+  }
+  detailEmptyEl.classList.add("hidden");
+  detailContentEl.classList.remove("hidden");
+
+  detailTitleEl.textContent = g.game;
+  detailAppIdEl.textContent = `AppID ${g.app_id} · ${g.effective_mode}`;
+
+  modeSelectEl.innerHTML = "";
   for (const m of MODES) {
     const opt = document.createElement("option");
     opt.value = m;
     opt.textContent = m;
     if (m === g.mode) opt.selected = true;
-    modeSelect.appendChild(opt);
+    modeSelectEl.appendChild(opt);
   }
-  modeTd.appendChild(modeSelect);
-  tr.appendChild(modeTd);
-
-  const keepTd = document.createElement("td");
-  const keepInput = document.createElement("input");
-  keepInput.type = "number";
-  keepInput.min = "1";
-  keepInput.placeholder = `default (${g.default_keep})`;
-  keepInput.className = "keep-input";
-  if (g.keep !== null && g.keep !== undefined) keepInput.value = g.keep;
-  keepTd.appendChild(keepInput);
-  tr.appendChild(keepTd);
-
-  const actionTd = document.createElement("td");
-  const saveBtn = document.createElement("button");
-  saveBtn.textContent = "Save";
-  saveBtn.addEventListener("click", async () => {
-    setStatus(`saving ${g.game}…`);
-    try {
-      const keep = keepInput.value === "" ? null : Number(keepInput.value);
-      const result = await invoke("set_game_config", {
-        appId: g.app_id,
-        mode: modeSelect.value,
-        keep,
-      });
-      setStatus(result.trim() || "saved");
-      await loadGames();
-    } catch (err) {
-      setStatus(`save failed: ${err}`);
-    }
-  });
-  actionTd.appendChild(saveBtn);
-
-  const resetBtn = document.createElement("button");
-  resetBtn.textContent = "Reset";
-  resetBtn.title = "Clear overrides (back to auto mode, default keep count)";
-  resetBtn.addEventListener("click", async () => {
-    setStatus(`resetting ${g.game}…`);
-    try {
-      const result = await invoke("clear_game_config", { appId: g.app_id });
-      setStatus(result.trim() || "reset");
-      await loadGames();
-    } catch (err) {
-      setStatus(`reset failed: ${err}`);
-    }
-  });
-  actionTd.appendChild(resetBtn);
-
-  tr.appendChild(actionTd);
-  return tr;
+  keepInputEl.placeholder = `default (${g.default_keep})`;
+  keepInputEl.value = g.keep !== null && g.keep !== undefined ? g.keep : "";
 }
 
-// ---- versions / restore / pin / delete -------------------------------------
+async function saveSelectedGame() {
+  if (selectedAppId === null) return;
+  setStatus("saving…");
+  try {
+    const keep = keepInputEl.value === "" ? null : Number(keepInputEl.value);
+    const result = await invoke("set_game_config", {
+      appId: selectedAppId,
+      mode: modeSelectEl.value,
+      keep,
+    });
+    setStatus(result.trim() || "saved");
+    await loadGames();
+  } catch (err) {
+    setStatus(`save failed: ${err}`);
+  }
+}
+
+async function resetSelectedGame() {
+  if (selectedAppId === null) return;
+  setStatus("resetting…");
+  try {
+    const result = await invoke("clear_game_config", { appId: selectedAppId });
+    setStatus(result.trim() || "reset");
+    await loadGames();
+  } catch (err) {
+    setStatus(`reset failed: ${err}`);
+  }
+}
+
+// ---- versions for the selected game ------------------------------------
 
 async function loadVersions() {
-  setStatus("loading…");
-  versionsBodyEl.innerHTML = "";
-  const raw = appIdInputEl.value.trim();
-  const appId = raw === "" ? null : Number(raw);
+  if (selectedAppId === null) return;
+  versionsListEl.innerHTML = "";
   try {
-    const versions = await invoke("list_versions", { appId });
+    const versions = await invoke("list_versions", { appId: selectedAppId });
     if (versions.length === 0) {
-      setStatus("no versions found");
+      versionsListEl.innerHTML = '<p class="muted">no versions yet</p>';
       return;
     }
+    versions.sort((a, b) => b.created - a.created);
     for (const v of versions) {
-      versionsBodyEl.appendChild(renderVersionRow(v));
+      versionsListEl.appendChild(renderVersionRow(v));
     }
-    setStatus(`${versions.length} version(s)`);
   } catch (err) {
-    setStatus(`error: ${err}`);
+    setStatus(`error loading versions: ${err}`);
   }
 }
 
 function renderVersionRow(v) {
-  const tr = document.createElement("tr");
+  const row = document.createElement("div");
+  row.className = "version-row";
 
-  const label = v.active ? " [active]" : v.pinned ? " [pinned]" : "";
-  const cells = [v.game, v.id + label, v.machine, v.os, v.files, humanBytes(v.size)];
-  for (const text of cells) {
-    const td = document.createElement("td");
-    td.textContent = text;
-    tr.appendChild(td);
-  }
+  const info = document.createElement("div");
+  info.className = "version-info";
+  const badge = v.active ? '<span class="badge active">active</span>' : v.pinned ? '<span class="badge pinned">pinned</span>' : "";
+  info.innerHTML = `
+    <div>${humanDate(v.created)} ${badge}</div>
+    <div class="muted">${v.machine} · ${v.os} · ${v.files} files · ${humanBytes(v.size)}</div>
+  `;
+  row.appendChild(info);
 
-  const restoreTd = document.createElement("td");
+  const actions = document.createElement("div");
+  actions.className = "version-actions";
+
   const restoreBtn = document.createElement("button");
   restoreBtn.textContent = "Restore";
   restoreBtn.disabled = v.active;
@@ -151,10 +181,8 @@ function renderVersionRow(v) {
       setStatus(`restore failed: ${err}`);
     }
   });
-  restoreTd.appendChild(restoreBtn);
-  tr.appendChild(restoreTd);
+  actions.appendChild(restoreBtn);
 
-  const pinTd = document.createElement("td");
   const pinBtn = document.createElement("button");
   pinBtn.textContent = v.pinned ? "Unpin" : "Pin";
   pinBtn.addEventListener("click", async () => {
@@ -171,16 +199,12 @@ function renderVersionRow(v) {
       setStatus(`pin toggle failed: ${err}`);
     }
   });
-  pinTd.appendChild(pinBtn);
-  tr.appendChild(pinTd);
+  actions.appendChild(pinBtn);
 
-  const deleteTd = document.createElement("td");
   const deleteBtn = document.createElement("button");
   deleteBtn.textContent = "Delete";
-  // Active head and pinned safety/conflict versions aren't meant to be
-  // casually deleted from here (D5/D14) — pin state already gates that via
-  // `yasgm rm`'s own no-op-on-missing behavior, but disabling avoids
-  // surprise data loss from a stray click on the row you're restoring from.
+  // Guard rail, not a D5/D14 requirement: avoids a stray click deleting the
+  // version you're currently restoring from.
   deleteBtn.disabled = v.active;
   deleteBtn.addEventListener("click", async () => {
     setStatus(`deleting ${v.id}…`);
@@ -192,21 +216,27 @@ function renderVersionRow(v) {
       setStatus(`delete failed: ${err}`);
     }
   });
-  deleteTd.appendChild(deleteBtn);
-  tr.appendChild(deleteTd);
+  actions.appendChild(deleteBtn);
 
-  return tr;
+  row.appendChild(actions);
+  return row;
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  appIdInputEl = document.querySelector("#app-id-input");
-  versionsBodyEl = document.querySelector("#versions-body");
-  gamesBodyEl = document.querySelector("#games-body");
+  gamesListEl = document.querySelector("#games-list");
+  detailEmptyEl = document.querySelector("#detail-empty");
+  detailContentEl = document.querySelector("#detail-content");
+  detailTitleEl = document.querySelector("#detail-title");
+  detailAppIdEl = document.querySelector("#detail-appid");
+  modeSelectEl = document.querySelector("#mode-select");
+  keepInputEl = document.querySelector("#keep-input");
+  saveBtnEl = document.querySelector("#save-btn");
+  resetBtnEl = document.querySelector("#reset-btn");
+  versionsListEl = document.querySelector("#versions-list");
   statusMsgEl = document.querySelector("#status-msg");
-  document.querySelector("#load-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    loadVersions();
-  });
+
+  saveBtnEl.addEventListener("click", saveSelectedGame);
+  resetBtnEl.addEventListener("click", resetSelectedGame);
+
   loadGames();
-  loadVersions();
 });
