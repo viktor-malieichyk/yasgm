@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "YASGM — Version Browser",
+        "title": "YASGM",
         "width": 900,
         "height": 600
       }

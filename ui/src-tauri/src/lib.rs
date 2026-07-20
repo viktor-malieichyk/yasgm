@@ -54,11 +54,57 @@ fn restore_version(app_id: u64, version_id: String) -> Result<String, String> {
     run_yasgm(&["restore", &app_id, "--version", &version_id])
 }
 
+/// One row from `yasgm config --json` (see `config_cmd` in main.rs).
+#[tauri::command]
+fn list_games() -> Result<Vec<serde_json::Value>, String> {
+    let stdout = run_yasgm(&["config", "--json"])?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+#[tauri::command]
+fn set_game_config(app_id: u64, mode: String, keep: Option<u32>) -> Result<String, String> {
+    let app_id = app_id.to_string();
+    let mut args = vec!["config", &app_id, "--mode", &mode];
+    let keep_str;
+    if let Some(keep) = keep {
+        keep_str = keep.to_string();
+        args.push("--keep");
+        args.push(&keep_str);
+    }
+    run_yasgm(&args)
+}
+
+#[tauri::command]
+fn clear_game_config(app_id: u64) -> Result<String, String> {
+    let app_id = app_id.to_string();
+    run_yasgm(&["config", &app_id, "--clear"])
+}
+
+#[tauri::command]
+fn set_pinned(app_id: u64, version_id: String, pinned: bool) -> Result<String, String> {
+    let app_id = app_id.to_string();
+    run_yasgm(&[if pinned { "pin" } else { "unpin" }, &app_id, &version_id])
+}
+
+#[tauri::command]
+fn remove_version(app_id: u64, version_id: String) -> Result<String, String> {
+    let app_id = app_id.to_string();
+    run_yasgm(&["rm", &app_id, &version_id])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![list_versions, restore_version])
+        .invoke_handler(tauri::generate_handler![
+            list_versions,
+            restore_version,
+            list_games,
+            set_game_config,
+            clear_game_config,
+            set_pinned,
+            remove_version
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

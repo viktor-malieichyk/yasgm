@@ -92,18 +92,52 @@ button {
   width: 260px;
 }
 
-#versions-table {
-  margin: 1.5em auto 0;
-  border-collapse: collapse;
+section {
   width: 90%;
+  margin-top: 2em;
 }
 
+section h2 {
+  text-align: left;
+  font-size: 1.1em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.3);
+  padding-bottom: 0.3em;
+}
+
+#games-table,
+#versions-table {
+  margin: 0.5em auto 0;
+  border-collapse: collapse;
+  width: 100%;
+}
+
+#games-table th,
+#games-table td,
 #versions-table th,
 #versions-table td {
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
   padding: 0.4em 0.8em;
   text-align: left;
   font-size: 0.9em;
+}
+
+#games-table td button {
+  margin-right: 0.4em;
+  padding: 0.3em 0.8em;
+}
+
+.keep-input {
+  width: 6em;
+  padding: 0.3em 0.6em;
+}
+
+#versions-table td button {
+  padding: 0.3em 0.8em;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 #status-msg {

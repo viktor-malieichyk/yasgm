@@ -452,11 +452,34 @@ iced (open question).
     here would have durably swapped the real DOS2 cloud head to an older
     save; not worth the risk to real data for what would be a redundant
     check.
-  Remaining in Phase 4: fill out the GUI (per-game settings, config
-  editing, pin/unpin/rm, not just versions+restore), decide whether/when to
-  split the core crate into lib+bin for direct GUI linkage, macOS packaging
-  (unsigned initially, D16), self-update, `.ludusavi.yaml` support,
-  additional cloud providers beyond OneDrive/LocalFolder.
+  - **GUI: per-game settings + pin/unpin/rm: DONE 2026-07-20.** Added a
+    "Games" section above the version browser: table of installed games
+    (name, AppID, mode dropdown, keep count with "default (N)" placeholder
+    when unset) with Save/Reset per row, backed by a new `--json` flag on
+    `config_cmd`'s list branch (same stderr/stdout split as `versions
+    --json`) plus `set_game_config`/`clear_game_config` Tauri commands
+    wrapping `yasgm config <appid> --mode --keep` / `--clear`. The versions
+    table gained Pin/Unpin and Delete buttons (`set_pinned`/
+    `remove_version`, wrapping `yasgm pin`/`unpin`/`rm`) alongside Restore;
+    Delete is disabled for the active version to avoid a stray click
+    deleting the version you're currently restoring from (D5/D14 don't
+    require this — it's just a GUI guard rail). Note: the Keep field has no
+    "clear override, keep mode override" affordance — leaving it blank on
+    Save just omits `--keep` from the CLI call (existing keep untouched),
+    matching the CLI's own behavior; only Reset clears both together via
+    `--clear`. Verified live: `npm run tauri dev` showed both real installed
+    games with correct auto-mode/default-keep placeholders, and the
+    versions table's active-row Restore/Delete disabled state, all from
+    real data (screenshot-confirmed). Didn't click-test Save/Pin/Delete
+    live against real state — each wraps a CLI path already verified
+    directly earlier (`config`, `pin`/`unpin`/`rm` against the LocalFolder
+    provider test), and the IPC argument-naming convention (`appId` →
+    `app_id`) was already proven live by `list_versions`/`restore_version`.
+  Remaining in Phase 4: decide whether/when to split the core crate into
+  lib+bin for direct GUI linkage (currently shells out to the `yasgm`
+  binary), macOS packaging (unsigned initially, D16), self-update,
+  `.ludusavi.yaml` support, additional cloud providers beyond
+  OneDrive/LocalFolder.
 
 ## Risks
 

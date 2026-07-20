@@ -982,7 +982,9 @@ fn config_cmd(args: &[String]) -> Result<()> {
 
     let Some(first) = pos.first() else {
         // List effective settings for installed games.
+        let json = flag(args, "--json");
         let ctx = load_ctx()?;
+        let mut json_out = Vec::new();
         for game in &ctx.games {
             let game_cfg = cfg.game(game.app_id);
             let effective = match (game_cfg.mode, ctx.merged_game(game.app_id)) {
@@ -996,11 +998,26 @@ fn config_cmd(args: &[String]) -> Result<()> {
                 }
                 (mode, _) => format!("{} (override)", mode.name()),
             };
+            if json {
+                json_out.push(serde_json::json!({
+                    "app_id": game.app_id,
+                    "game": game.name,
+                    "mode": game_cfg.mode.name(),
+                    "effective_mode": effective,
+                    "keep": game_cfg.keep,
+                    "default_keep": store::DEFAULT_KEEP,
+                    "in_manifest": ctx.merged_game(game.app_id).is_some(),
+                }));
+                continue;
+            }
             let keep = game_cfg
                 .keep
                 .map(|k| k.to_string())
                 .unwrap_or_else(|| format!("{} (default)", store::DEFAULT_KEEP));
             println!("{} ({}) — mode: {effective}, keep: {keep}", game.name, game.app_id);
+        }
+        if json {
+            println!("{}", serde_json::to_string(&json_out)?);
         }
         return Ok(());
     };
@@ -1237,7 +1254,7 @@ fn main() -> Result<()> {
                  provider [onedrive|local <path>|status]\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
-                 config [<appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
+                 config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \
                  rm <appid> <version-id>"
             );
