@@ -349,12 +349,24 @@ fn provider_cmd(args: &[String]) -> Result<()> {
             cfg.save()?;
             println!("cloud provider set to local folder: {}", path.display());
         }
-        None | Some("status") => match &cfg.provider {
-            config::ProviderConfig::Onedrive => println!("cloud provider: OneDrive"),
-            config::ProviderConfig::Local { path } => {
-                println!("cloud provider: local folder at {}", path.display())
+        None | Some("status") => {
+            if flag(args, "--json") {
+                let json = match &cfg.provider {
+                    config::ProviderConfig::Onedrive => serde_json::json!({"type": "onedrive"}),
+                    config::ProviderConfig::Local { path } => {
+                        serde_json::json!({"type": "local", "path": path})
+                    }
+                };
+                println!("{}", serde_json::to_string(&json)?);
+            } else {
+                match &cfg.provider {
+                    config::ProviderConfig::Onedrive => println!("cloud provider: OneDrive"),
+                    config::ProviderConfig::Local { path } => {
+                        println!("cloud provider: local folder at {}", path.display())
+                    }
+                }
             }
-        },
+        }
         Some(other) => {
             anyhow::bail!("usage: yasgm provider [onedrive|local <path>|status] (got {other:?})")
         }
@@ -747,10 +759,20 @@ fn autostart_cmd(args: &[String]) -> Result<()> {
     match positionals(args).first().map(String::as_str) {
         Some("on") => println!("{}", autostart::enable()?),
         Some("off") => println!("{}", autostart::disable()?),
-        None | Some("status") => match autostart::status()? {
-            Some(detail) => println!("autostart: on ({detail})"),
-            None => println!("autostart: off"),
-        },
+        None | Some("status") => {
+            let detail = autostart::status()?;
+            if flag(args, "--json") {
+                println!(
+                    "{}",
+                    serde_json::json!({"enabled": detail.is_some(), "detail": detail})
+                );
+            } else {
+                match detail {
+                    Some(detail) => println!("autostart: on ({detail})"),
+                    None => println!("autostart: off"),
+                }
+            }
+        }
         Some(other) => anyhow::bail!("usage: yasgm autostart [on|off|status] (got {other:?})"),
     }
     Ok(())
@@ -1257,8 +1279,8 @@ fn main() -> Result<()> {
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 watch [--settle <secs>] [--tray]\n  autostart [on|off|status]\n  \
-                 provider [onedrive|local <path>|status]\n  \
+                 watch [--settle <secs>] [--tray]\n  autostart [on|off|status] [--json]\n  \
+                 provider [onedrive|local <path>|status] [--json]\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \

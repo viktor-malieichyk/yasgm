@@ -592,8 +592,68 @@ iced (open question).
     rewrite — not yet verified live against real dark mode (an earlier
     attempt to toggle system dark mode for testing was interrupted; system
     appearance was reverted to its original light setting and left alone).
-  Remaining in Phase 4: verify dark mode live, self-update, additional
-  cloud providers beyond OneDrive/LocalFolder.
+  - **GUI: app icon, tray/minimize, Settings screen, accent color: DONE
+    2026-07-21.**
+    - **Icon**: procedurally generated (`ui/scripts/` doesn't hold it —
+      one-off Python/Pillow script, not checked in) — white cloud +
+      circular sync-arrows badge on a blue gradient rounded square,
+      matching the daemon tray dot's color language. Regenerated the full
+      icon set via `npx tauri icon`; deleted the iOS/Android/Windows-Store
+      assets it also produces since they're out of scope (Windows 10+,
+      macOS, SteamOS only per Vision).
+    - **Minimize to tray**: closing the window now hides it
+      (`WindowEvent::CloseRequested` → `window.hide()` +
+      `api.prevent_close()`) instead of quitting; a new tray icon (built
+      via `tauri::tray::TrayIconBuilder` in `setup()`, using
+      `app.default_window_icon()`) with "Show YASGM"/"Quit YASGM" restores
+      it or actually exits; macOS Dock-icon "reopen" also restores it
+      (`RunEvent::Reopen`). This is a second, independent tray icon from
+      the CLI daemon's own `watch --tray` — no unification attempted.
+    - **Single-instance**: added while verifying the above, after a second
+      `target/debug/ui` process turned up during testing (from not killing
+      a prior dev session — a real scenario once "closes to tray instead
+      of quitting" is the default, since a duplicate double-click is easy
+      to end up with). `tauri-plugin-single-instance`, registered first
+      per its docs; a second launch attempt just calls the same
+      `show_main_window` instead of starting a process. Verified live:
+      launching the built binary again while one instance was already
+      running exited immediately and left exactly one process.
+    - **Settings screen**: the theme picker moved off a plain `<select>`
+      onto a proper Settings tab (top-bar `Library`/`Settings` nav) with a
+      segmented Light/Dark/System control, plus two more settings the CLI
+      already had but the GUI didn't expose: cloud provider (current
+      provider display, "Check connection" running the real `yasgm
+      status`, "Use OneDrive"/"Sign in…" — the latter blocks on the real
+      interactive browser OAuth flow — and "Use this folder" for
+      LocalFolder with a plain text path input, no native folder-picker
+      dialog yet) and autostart (checkbox wrapping `yasgm autostart
+      on/off`). New `--json` output added to `provider` and `autostart`
+      CLI commands (same stdout/stderr split as the existing `--json`
+      flags) for the new `get_provider`/`get_autostart` Tauri commands to
+      parse. Found and fixed a real bug while verifying: `.hidden {
+      display: none }` was defined before `.settings-page { display: flex
+      }` in the stylesheet, so equal-specificity cascade let the later
+      rule win and both views rendered stacked at once regardless of the
+      `hidden` class; fixed by making `.hidden` `!important` (a utility
+      class is supposed to always win). Verified live: Settings shows real
+      provider ("OneDrive") and autostart ("off") state; "Check connection"
+      returned the real Graph app-folder probe result; the Dark segment
+      force-applied dark styling regardless of system appearance.
+    - **System accent color**: replaced the hardcoded `#646cff` brand
+      purple used for selection borders/backgrounds, the segmented
+      control's selected state, links, and button-hover borders with the
+      CSS4 system color keywords `AccentColor`/`AccentColorText` (Safari
+      15.4+, well under the macOS 13 minimum), with a `#646cff` fallback
+      inside `@supports not (color: AccentColor)`. Tinted backgrounds use
+      `color-mix(in srgb, var(--accent) N%, transparent)` instead of a
+      fixed rgba. Verified live: selection/segmented-control colors
+      rendered as this Mac's actual (blue) system accent color, not the
+      old purple, with no broken/black fallback rendering.
+  Remaining in Phase 4: verify dark mode against real system dark mode
+  (deferred once already this session; still outstanding), a native
+  folder-picker dialog for the LocalFolder path (currently a plain text
+  input), self-update, additional cloud providers beyond
+  OneDrive/LocalFolder.
 
 ## Risks
 

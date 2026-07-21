@@ -4,14 +4,78 @@
   line-height: 22px;
   font-weight: 400;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+
+  /* Light theme (default). Overridden by prefers-color-scheme for
+     data-theme="system" (the default, no attribute set), or forced
+     directly by data-theme="light"/"dark" from the theme picker. */
+  --fg: #0f0f0f;
+  --bg: #f6f6f6;
+  --input-fg: #0f0f0f;
+  --input-bg: #ffffff;
+  --input-border: rgba(128, 128, 128, 0.4);
+  --btn-active-bg: #e8e8e8;
+  --selected-bg: color-mix(in srgb, var(--accent) 12%, transparent);
+  --badge-active-bg: rgba(52, 168, 83, 0.18);
+  --badge-active-fg: #1e7e34;
+  --badge-pinned-bg: rgba(255, 152, 0, 0.18);
+  --badge-pinned-fg: #a05a00;
+
+  /* System accent color (macOS: System Settings > Appearance > Accent
+     color), not a fixed brand color — supported since Safari 15.4, well
+     under our macOS 13 minimum. --accent-text is the color-scheme-aware
+     text color guaranteed to contrast against it. */
+  --accent: AccentColor;
+  --accent-text: AccentColorText;
+
+  color: var(--fg);
+  background-color: var(--bg);
+}
+
+@supports not (color: AccentColor) {
+  :root {
+    --accent: #646cff;
+    --accent-text: #ffffff;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fg: #f6f6f6;
+    --bg: #2f2f2f;
+    --input-fg: #ffffff;
+    --input-bg: #3a3a3a;
+    --input-border: rgba(255, 255, 255, 0.2);
+    --btn-active-bg: #4a4a4a;
+    --selected-bg: color-mix(in srgb, var(--accent) 25%, transparent);
+    --badge-active-bg: rgba(52, 168, 83, 0.28);
+    --badge-active-fg: #6fe08a;
+    --badge-pinned-bg: rgba(255, 152, 0, 0.28);
+    --badge-pinned-fg: #ffb85c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --fg: #f6f6f6;
+  --bg: #2f2f2f;
+  --input-fg: #ffffff;
+  --input-bg: #3a3a3a;
+  --input-border: rgba(255, 255, 255, 0.2);
+  --btn-active-bg: #4a4a4a;
+  --selected-bg: color-mix(in srgb, var(--accent) 25%, transparent);
+  --badge-active-bg: rgba(52, 168, 83, 0.28);
+  --badge-active-fg: #6fe08a;
+  --badge-pinned-bg: rgba(255, 152, 0, 0.28);
+  --badge-pinned-fg: #ffb85c;
+}
+
+body {
+  color: var(--fg);
+  background-color: var(--bg);
 }
 
 .container {
@@ -22,9 +86,69 @@
   align-items: center;
 }
 
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  width: 100%;
+  max-width: 900px;
+  margin-bottom: 0.6em;
+}
+
 h1 {
-  text-align: center;
-  margin: 0 0 0.6em;
+  margin: 0;
+}
+
+.view-nav {
+  display: flex;
+  gap: 0.3em;
+}
+
+.nav-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  font-size: 0.85em;
+  opacity: 0.65;
+}
+
+.nav-btn:hover {
+  border-color: rgba(128, 128, 128, 0.3);
+  opacity: 0.85;
+}
+
+.nav-btn.selected {
+  background-color: var(--selected-bg);
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+/* ---- segmented control (Appearance) ---- */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.segment {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 0.4em 1em;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--input-border);
+}
+
+.segment.selected {
+  background-color: var(--accent);
+  color: var(--accent-text);
 }
 
 h2,
@@ -40,25 +164,25 @@ h3 {
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--accent);
   text-decoration: inherit;
 }
 
 a:hover {
-  color: #535bf2;
+  opacity: 0.8;
 }
 
 input,
 select,
 button {
   border-radius: 6px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--input-border);
   padding: 0.4em 0.7em;
   font-size: 0.95em;
   font-weight: 500;
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
+  color: var(--input-fg);
+  background-color: var(--input-bg);
   transition: border-color 0.2s;
   outline: none;
 }
@@ -70,18 +194,20 @@ button {
 }
 
 button:hover {
-  border-color: #396cd8;
+  border-color: var(--accent);
 }
 button:active {
-  background-color: #e8e8e8;
+  background-color: var(--btn-active-bg);
 }
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
+/* !important: this utility class must win regardless of what other rules
+   (e.g. .settings-page's own `display: flex`) set on the same element. */
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .muted {
@@ -126,8 +252,8 @@ button:disabled {
 }
 
 .game-item.selected {
-  background-color: rgba(100, 108, 255, 0.12);
-  border-color: #646cff;
+  background-color: var(--selected-bg);
+  border-color: var(--accent);
 }
 
 .game-name {
@@ -210,13 +336,13 @@ button:disabled {
 }
 
 .badge.active {
-  background-color: rgba(52, 168, 83, 0.18);
-  color: #1e7e34;
+  background-color: var(--badge-active-bg);
+  color: var(--badge-active-fg);
 }
 
 .badge.pinned {
-  background-color: rgba(255, 152, 0, 0.18);
-  color: #a05a00;
+  background-color: var(--badge-pinned-bg);
+  color: var(--badge-pinned-fg);
 }
 
 #status-msg {
@@ -225,38 +351,49 @@ button:disabled {
   min-height: 1.2em;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
+/* ---- settings screen ---- */
 
-  a:hover {
-    color: #24c8db;
-  }
+.settings-page {
+  width: 100%;
+  max-width: 900px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 1.6em;
+}
 
-  input,
-  select,
-  button {
-    color: #ffffff;
-    background-color: #3a3a3a;
-    border-color: rgba(255, 255, 255, 0.2);
-  }
-  button:active {
-    background-color: #4a4a4a;
-  }
+.settings-section h3 {
+  margin-top: 0;
+}
 
-  .game-item.selected {
-    background-color: rgba(100, 108, 255, 0.25);
-  }
+.provider-option {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 8px;
+  padding: 0.7em 0.9em;
+  margin-top: 0.6em;
+}
 
-  .badge.active {
-    background-color: rgba(52, 168, 83, 0.28);
-    color: #6fe08a;
-  }
+.provider-option-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6em;
+  margin-bottom: 0.5em;
+}
 
-  .badge.pinned {
-    background-color: rgba(255, 152, 0, 0.28);
-    color: #ffb85c;
-  }
+#provider-local-path {
+  flex: 1;
+  min-width: 12em;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  cursor: pointer;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: auto;
+  padding: 0;
 }

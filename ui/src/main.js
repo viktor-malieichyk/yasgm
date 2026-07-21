@@ -1,6 +1,7 @@
 const { invoke } = window.__TAURI__.core;
 
 const MODES = ["auto", "sync", "backup", "off"];
+const THEME_KEY = "yasgm-theme";
 
 let gamesListEl;
 let detailEmptyEl;
@@ -13,9 +14,61 @@ let saveBtnEl;
 let resetBtnEl;
 let versionsListEl;
 let statusMsgEl;
+let themeSwitchEl;
+let navLibraryEl;
+let navSettingsEl;
+let libraryViewEl;
+let settingsViewEl;
+let providerCurrentEl;
+let providerCheckBtnEl;
+let providerStatusMsgEl;
+let providerOnedriveBtnEl;
+let providerAuthBtnEl;
+let providerAuthMsgEl;
+let providerLocalPathEl;
+let providerLocalBtnEl;
+let autostartToggleEl;
+let autostartDetailEl;
 
 let games = [];
 let selectedAppId = null;
+
+// ---- top-level view switching (Library / Settings) -----------------------
+
+function showView(view) {
+  const isLibrary = view === "library";
+  libraryViewEl.classList.toggle("hidden", !isLibrary);
+  settingsViewEl.classList.toggle("hidden", isLibrary);
+  navLibraryEl.classList.toggle("selected", isLibrary);
+  navSettingsEl.classList.toggle("selected", !isLibrary);
+  if (!isLibrary) {
+    loadProvider();
+    loadAutostart();
+  }
+}
+
+// ---- theme (light/dark/system) ------------------------------------------
+
+function applyTheme(theme) {
+  if (theme === "system") {
+    delete document.documentElement.dataset.theme;
+  } else {
+    document.documentElement.dataset.theme = theme;
+  }
+  for (const seg of themeSwitchEl.querySelectorAll(".segment")) {
+    seg.classList.toggle("selected", seg.dataset.themeOption === theme);
+  }
+  // Also sync the native window chrome (titlebar) where available; the
+  // CSS above is what actually themes the page content either way.
+  const win = window.__TAURI__?.window?.getCurrentWindow?.();
+  if (win) {
+    win.setTheme(theme === "system" ? null : theme).catch(() => {});
+  }
+}
+
+function loadTheme() {
+  applyTheme(localStorage.getItem(THEME_KEY) || "system");
+}
 
 function setStatus(text) {
   statusMsgEl.textContent = text;
@@ -222,6 +275,97 @@ function renderVersionRow(v) {
   return row;
 }
 
+// ---- settings: cloud provider ---------------------------------------------
+
+function describeProvider(p) {
+  return p.type === "onedrive" ? "OneDrive" : `Local folder — ${p.path}`;
+}
+
+async function loadProvider() {
+  try {
+    const p = await invoke("get_provider");
+    providerCurrentEl.textContent = `Current provider: ${describeProvider(p)}`;
+    providerLocalPathEl.value = p.type === "local" ? p.path : "";
+  } catch (err) {
+    providerCurrentEl.textContent = `error loading provider: ${err}`;
+  }
+}
+
+async function checkProviderStatus() {
+  providerStatusMsgEl.textContent = "checking…";
+  try {
+    const result = await invoke("cloud_status");
+    providerStatusMsgEl.textContent = result.trim();
+  } catch (err) {
+    providerStatusMsgEl.textContent = `not ready: ${err}`;
+  }
+}
+
+async function useOnedrive() {
+  setStatus("switching to OneDrive…");
+  try {
+    const result = await invoke("set_provider_onedrive");
+    setStatus(result.trim() || "switched to OneDrive");
+    await loadProvider();
+  } catch (err) {
+    setStatus(`switch failed: ${err}`);
+  }
+}
+
+async function signInOnedrive() {
+  providerAuthMsgEl.textContent = "opening browser for sign-in…";
+  providerAuthBtnEl.disabled = true;
+  try {
+    const result = await invoke("cloud_auth");
+    providerAuthMsgEl.textContent = result.trim().split("\n")[0] || "signed in";
+  } catch (err) {
+    providerAuthMsgEl.textContent = `sign-in failed: ${err}`;
+  } finally {
+    providerAuthBtnEl.disabled = false;
+  }
+}
+
+async function useLocalFolder() {
+  const path = providerLocalPathEl.value.trim();
+  if (!path) {
+    setStatus("enter a folder path first");
+    return;
+  }
+  setStatus(`switching to local folder ${path}…`);
+  try {
+    const result = await invoke("set_provider_local", { path });
+    setStatus(result.trim() || "switched to local folder");
+    await loadProvider();
+  } catch (err) {
+    setStatus(`switch failed: ${err}`);
+  }
+}
+
+// ---- settings: autostart --------------------------------------------------
+
+async function loadAutostart() {
+  try {
+    const a = await invoke("get_autostart");
+    autostartToggleEl.checked = a.enabled;
+    autostartDetailEl.textContent = a.detail ? a.detail : "";
+  } catch (err) {
+    autostartDetailEl.textContent = `error loading autostart: ${err}`;
+  }
+}
+
+async function toggleAutostart() {
+  const enabled = autostartToggleEl.checked;
+  setStatus(enabled ? "enabling autostart…" : "disabling autostart…");
+  try {
+    const result = await invoke("set_autostart", { enabled });
+    setStatus(result.trim() || "done");
+    await loadAutostart();
+  } catch (err) {
+    setStatus(`autostart change failed: ${err}`);
+    autostartToggleEl.checked = !enabled;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   gamesListEl = document.querySelector("#games-list");
   detailEmptyEl = document.querySelector("#detail-empty");
@@ -234,9 +378,42 @@ window.addEventListener("DOMContentLoaded", () => {
   resetBtnEl = document.querySelector("#reset-btn");
   versionsListEl = document.querySelector("#versions-list");
   statusMsgEl = document.querySelector("#status-msg");
+  themeSwitchEl = document.querySelector("#theme-switch");
+  navLibraryEl = document.querySelector("#nav-library");
+  navSettingsEl = document.querySelector("#nav-settings");
+  libraryViewEl = document.querySelector("#library-view");
+  settingsViewEl = document.querySelector("#settings-view");
+  providerCurrentEl = document.querySelector("#provider-current");
+  providerCheckBtnEl = document.querySelector("#provider-check-btn");
+  providerStatusMsgEl = document.querySelector("#provider-status-msg");
+  providerOnedriveBtnEl = document.querySelector("#provider-onedrive-btn");
+  providerAuthBtnEl = document.querySelector("#provider-auth-btn");
+  providerAuthMsgEl = document.querySelector("#provider-auth-msg");
+  providerLocalPathEl = document.querySelector("#provider-local-path");
+  providerLocalBtnEl = document.querySelector("#provider-local-btn");
+  autostartToggleEl = document.querySelector("#autostart-toggle");
+  autostartDetailEl = document.querySelector("#autostart-detail");
 
   saveBtnEl.addEventListener("click", saveSelectedGame);
   resetBtnEl.addEventListener("click", resetSelectedGame);
 
+  navLibraryEl.addEventListener("click", () => showView("library"));
+  navSettingsEl.addEventListener("click", () => showView("settings"));
+
+  for (const seg of themeSwitchEl.querySelectorAll(".segment")) {
+    seg.addEventListener("click", () => {
+      const theme = seg.dataset.themeOption;
+      localStorage.setItem(THEME_KEY, theme);
+      applyTheme(theme);
+    });
+  }
+
+  providerCheckBtnEl.addEventListener("click", checkProviderStatus);
+  providerOnedriveBtnEl.addEventListener("click", useOnedrive);
+  providerAuthBtnEl.addEventListener("click", signInOnedrive);
+  providerLocalBtnEl.addEventListener("click", useLocalFolder);
+  autostartToggleEl.addEventListener("change", toggleAutostart);
+
+  loadTheme();
   loadGames();
 });

@@ -10,9 +10,15 @@
 
   <body>
     <main class="container">
-      <h1>YASGM</h1>
+      <div class="top-bar">
+        <h1>YASGM</h1>
+        <nav class="view-nav">
+          <button id="nav-library" class="nav-btn selected" type="button">Library</button>
+          <button id="nav-settings" class="nav-btn" type="button">Settings</button>
+        </nav>
+      </div>
 
-      <div class="shell">
+      <div id="library-view" class="shell">
         <aside id="games-list"></aside>
 
         <section id="detail">
@@ -40,6 +46,57 @@
             <h3>Versions</h3>
             <div id="versions-list"></div>
           </div>
+        </section>
+      </div>
+
+      <div id="settings-view" class="settings-page hidden">
+        <section class="settings-section">
+          <h3>Appearance</h3>
+          <div id="theme-switch" class="segmented" role="group" aria-label="Appearance">
+            <button type="button" class="segment" data-theme-option="system">System</button>
+            <button type="button" class="segment" data-theme-option="light">Light</button>
+            <button type="button" class="segment" data-theme-option="dark">Dark</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Cloud provider</h3>
+          <p id="provider-current" class="muted"></p>
+
+          <div class="settings-row">
+            <button id="provider-check-btn" type="button">Check connection</button>
+          </div>
+          <p id="provider-status-msg" class="muted"></p>
+
+          <div class="provider-option">
+            <div class="provider-option-header">
+              <strong>OneDrive</strong>
+              <button id="provider-onedrive-btn" type="button">Use OneDrive</button>
+            </div>
+            <div class="settings-row">
+              <button id="provider-auth-btn" type="button">Sign in…</button>
+              <span id="provider-auth-msg" class="muted"></span>
+            </div>
+          </div>
+
+          <div class="provider-option">
+            <div class="provider-option-header">
+              <strong>Local folder</strong>
+            </div>
+            <div class="settings-row">
+              <input id="provider-local-path" type="text" placeholder="/path/to/sync/folder" />
+              <button id="provider-local-btn" type="button">Use this folder</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Autostart</h3>
+          <label class="toggle-row">
+            <input id="autostart-toggle" type="checkbox" />
+            Launch YASGM's sync daemon at login
+          </label>
+          <p id="autostart-detail" class="muted"></p>
         </section>
       </div>
 

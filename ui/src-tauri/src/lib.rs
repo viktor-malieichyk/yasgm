@@ -11,8 +11,19 @@
 //! app via `bundle.externalBin`, so this works identically in `tauri dev`
 //! and in a built `.app` — no dev-path guessing or reliance on PATH.
 
-use tauri::AppHandle;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tauri_plugin_shell::ShellExt;
+
+/// Shows and focuses the main window (tray menu "Show", tray icon click,
+/// and macOS Dock-icon "reopen" all funnel through here).
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 async fn run_yasgm(app: &AppHandle, args: &[&str]) -> Result<String, String> {
     let sidecar = app
@@ -93,9 +104,70 @@ async fn remove_version(app: AppHandle, app_id: u64, version_id: String) -> Resu
     run_yasgm(&app, &["rm", &app_id, &version_id]).await
 }
 
+// ---- settings: cloud provider + autostart ----------------------------
+
+/// `{"type": "onedrive"}` or `{"type": "local", "path": "..."}` (see
+/// `provider_cmd` in main.rs).
+#[tauri::command]
+async fn get_provider(app: AppHandle) -> Result<serde_json::Value, String> {
+    let stdout = run_yasgm(&app, &["provider", "--json"]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+#[tauri::command]
+async fn set_provider_onedrive(app: AppHandle) -> Result<String, String> {
+    run_yasgm(&app, &["provider", "onedrive"]).await
+}
+
+#[tauri::command]
+async fn set_provider_local(app: AppHandle, path: String) -> Result<String, String> {
+    run_yasgm(&app, &["provider", "local", &path]).await
+}
+
+/// Runs the real connectivity check (Graph app-folder probe for OneDrive,
+/// directory read/write probe for LocalFolder).
+#[tauri::command]
+async fn cloud_status(app: AppHandle) -> Result<String, String> {
+    run_yasgm(&app, &["status"]).await
+}
+
+/// Interactive OneDrive sign-in: opens the system browser and blocks until
+/// the user finishes (or the flow fails/expires). No-op message if the
+/// provider is currently LocalFolder.
+#[tauri::command]
+async fn cloud_auth(app: AppHandle) -> Result<String, String> {
+    run_yasgm(&app, &["auth"]).await
+}
+
+/// `{"enabled": bool, "detail": string|null}` (see `autostart_cmd` in
+/// main.rs).
+#[tauri::command]
+async fn get_autostart(app: AppHandle) -> Result<serde_json::Value, String> {
+    let stdout = run_yasgm(&app, &["autostart", "--json"]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+#[tauri::command]
+async fn set_autostart(app: AppHandle, enabled: bool) -> Result<String, String> {
+    run_yasgm(&app, &["autostart", if enabled { "on" } else { "off" }]).await
+}
+
+/// Closing the window hides it instead of quitting (minimize to tray); the
+/// tray icon's "Show YASGM" / left-click, or clicking the Dock icon again
+/// on macOS, bring it back. "Quit YASGM" in the tray menu is the only way
+/// to actually exit.
+///
+/// Single-instance (must be the first plugin registered, per its docs): a
+/// second launch attempt hands its argv/cwd to the already-running
+/// instance via this callback instead of starting a second process, and we
+/// just surface the existing window — a background daemon's tray icon
+/// makes a stray duplicate process easy to end up with otherwise.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
@@ -105,8 +177,44 @@ pub fn run() {
             set_game_config,
             clear_game_config,
             set_pinned,
-            remove_version
+            remove_version,
+            get_provider,
+            set_provider_onedrive,
+            set_provider_local,
+            cloud_status,
+            cloud_auth,
+            get_autostart,
+            set_autostart
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .setup(|app| {
+            let show_item = MenuItem::with_id(app, "show", "Show YASGM", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit YASGM", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().expect("app icon for tray"))
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Reopen { .. } = event {
+            show_main_window(app_handle);
+        }
+    });
 }
