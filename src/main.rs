@@ -374,6 +374,62 @@ fn provider_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Real, existing local save directories for one installed game — the
+/// subset of `doctor`'s per-game resolution that has data on disk, as JSON
+/// (used by the GUI's "Open save location" button).
+fn paths_cmd(args: &[String]) -> Result<()> {
+    let app_id = parse_app_id(args).context("usage: yasgm paths <appid>")?;
+    let ctx = load_ctx()?;
+    let game = ctx
+        .games
+        .iter()
+        .find(|g| g.app_id == app_id)
+        .context("game is not installed on this machine")?;
+    let merged = ctx.merged_game(app_id).context("game is not in the manifest")?;
+
+    let mut paths = Vec::new();
+    for (template, rule) in &merged.files {
+        if !rule.is_save() {
+            continue;
+        }
+        let Some(res) = resolve::resolve_rule(template, rule, ctx.os, game) else {
+            continue;
+        };
+        let Some(path) = &res.path else { continue };
+        for m in resolve::existing_matches(path) {
+            let (files, bytes) = resolve::measure(&m);
+            paths.push(serde_json::json!({"path": m, "files": files, "bytes": bytes}));
+        }
+    }
+    println!("{}", serde_json::to_string(&paths)?);
+    Ok(())
+}
+
+/// Where this game's backups actually live on disk, if anywhere — only the
+/// LocalFolder provider has one (OneDrive backups have no local path, D8/
+/// D13). Used by the GUI's "Open backups location" button; creates the
+/// directory if it doesn't exist yet so opening it never fails on absence.
+fn backup_location_cmd(args: &[String]) -> Result<()> {
+    let app_id = parse_app_id(args).context("usage: yasgm backup-location <appid>")?;
+    let cfg = config::Config::load();
+    let json = match &cfg.provider {
+        config::ProviderConfig::Onedrive => serde_json::json!({"kind": "cloud"}),
+        config::ProviderConfig::Local { path } => {
+            let root = steam::find_steam_root().context("Steam installation not found")?;
+            let account = steam::account_ids(&root)
+                .into_iter()
+                .next()
+                .context("no Steam account found in userdata")?;
+            let game_dir = path.join(format!("accounts/{account}/games/{app_id}"));
+            std::fs::create_dir_all(&game_dir)
+                .with_context(|| format!("creating {}", game_dir.display()))?;
+            serde_json::json!({"kind": "local", "path": game_dir})
+        }
+    };
+    println!("{}", serde_json::to_string(&json)?);
+    Ok(())
+}
+
 // ---- sync -----------------------------------------------------------------
 
 fn sync_cmd(args: &[String]) -> Result<()> {
@@ -1265,6 +1321,8 @@ fn main() -> Result<()> {
         Some("watch") => watch_cmd(&args),
         Some("autostart") => autostart_cmd(&args),
         Some("provider") => provider_cmd(&args),
+        Some("paths") => paths_cmd(&args),
+        Some("backup-location") => backup_location_cmd(&args),
         Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
@@ -1281,6 +1339,7 @@ fn main() -> Result<()> {
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
                  watch [--settle <secs>] [--tray]\n  autostart [on|off|status] [--json]\n  \
                  provider [onedrive|local <path>|status] [--json]\n  \
+                 paths <appid>\n  backup-location <appid>\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \

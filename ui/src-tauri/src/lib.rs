@@ -14,6 +14,7 @@
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_shell::ShellExt;
 
 /// Shows and focuses the main window (tray menu "Show", tray icon click,
@@ -104,6 +105,32 @@ async fn remove_version(app: AppHandle, app_id: u64, version_id: String) -> Resu
     run_yasgm(&app, &["rm", &app_id, &version_id]).await
 }
 
+// ---- open in Finder/Explorer -------------------------------------------
+
+/// Real local save directories for one game, from `yasgm paths <appid>`
+/// (only ones that actually exist on disk — see `paths_cmd` in main.rs).
+#[tauri::command]
+async fn get_save_paths(app: AppHandle, app_id: u64) -> Result<Vec<serde_json::Value>, String> {
+    let app_id = app_id.to_string();
+    let stdout = run_yasgm(&app, &["paths", &app_id]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+/// `{"kind": "cloud"}` (OneDrive — no local path) or `{"kind": "local",
+/// "path": "..."}` (LocalFolder provider; see `backup_location_cmd` in
+/// main.rs, which also creates the directory so opening it never fails).
+#[tauri::command]
+async fn get_backup_location(app: AppHandle, app_id: u64) -> Result<serde_json::Value, String> {
+    let app_id = app_id.to_string();
+    let stdout = run_yasgm(&app, &["backup-location", &app_id]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+#[tauri::command]
+fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+    app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())
+}
+
 // ---- settings: cloud provider + autostart ----------------------------
 
 /// `{"type": "onedrive"}` or `{"type": "local", "path": "..."}` (see
@@ -184,7 +211,10 @@ pub fn run() {
             cloud_status,
             cloud_auth,
             get_autostart,
-            set_autostart
+            set_autostart,
+            get_save_paths,
+            get_backup_location,
+            open_path
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show YASGM", true, None::<&str>)?;

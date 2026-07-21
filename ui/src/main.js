@@ -12,6 +12,9 @@ let modeSelectEl;
 let keepInputEl;
 let saveBtnEl;
 let resetBtnEl;
+let openSavesBtnEl;
+let openBackupsBtnEl;
+let openLocationMsgEl;
 let versionsListEl;
 let statusMsgEl;
 let themeSwitchEl;
@@ -124,6 +127,7 @@ function selectGame(appId) {
   selectedAppId = appId;
   renderGamesList();
   renderDetailSettings();
+  openLocationMsgEl.textContent = "";
   loadVersions();
 }
 
@@ -182,6 +186,41 @@ async function resetSelectedGame() {
     await loadGames();
   } catch (err) {
     setStatus(`reset failed: ${err}`);
+  }
+}
+
+async function openSaveLocation() {
+  if (selectedAppId === null) return;
+  openLocationMsgEl.textContent = "looking for save location…";
+  try {
+    const paths = await invoke("get_save_paths", { appId: selectedAppId });
+    if (paths.length === 0) {
+      openLocationMsgEl.textContent = "no save data found on this machine yet";
+      return;
+    }
+    // Most games resolve to a single root; if more than one, just open the
+    // first — the rest are still visible via `yasgm doctor`.
+    await invoke("open_path", { path: paths[0].path });
+    openLocationMsgEl.textContent = "";
+  } catch (err) {
+    openLocationMsgEl.textContent = `couldn't open save location: ${err}`;
+  }
+}
+
+async function openBackupsLocation() {
+  if (selectedAppId === null) return;
+  openLocationMsgEl.textContent = "looking for backups location…";
+  try {
+    const loc = await invoke("get_backup_location", { appId: selectedAppId });
+    if (loc.kind === "cloud") {
+      openLocationMsgEl.textContent =
+        "backups are stored in OneDrive (cloud) — no local folder to open";
+      return;
+    }
+    await invoke("open_path", { path: loc.path });
+    openLocationMsgEl.textContent = "";
+  } catch (err) {
+    openLocationMsgEl.textContent = `couldn't open backups location: ${err}`;
   }
 }
 
@@ -376,6 +415,9 @@ window.addEventListener("DOMContentLoaded", () => {
   keepInputEl = document.querySelector("#keep-input");
   saveBtnEl = document.querySelector("#save-btn");
   resetBtnEl = document.querySelector("#reset-btn");
+  openSavesBtnEl = document.querySelector("#open-saves-btn");
+  openBackupsBtnEl = document.querySelector("#open-backups-btn");
+  openLocationMsgEl = document.querySelector("#open-location-msg");
   versionsListEl = document.querySelector("#versions-list");
   statusMsgEl = document.querySelector("#status-msg");
   themeSwitchEl = document.querySelector("#theme-switch");
@@ -396,6 +438,8 @@ window.addEventListener("DOMContentLoaded", () => {
 
   saveBtnEl.addEventListener("click", saveSelectedGame);
   resetBtnEl.addEventListener("click", resetSelectedGame);
+  openSavesBtnEl.addEventListener("click", openSaveLocation);
+  openBackupsBtnEl.addEventListener("click", openBackupsLocation);
 
   navLibraryEl.addEventListener("click", () => showView("library"));
   navSettingsEl.addEventListener("click", () => showView("settings"));

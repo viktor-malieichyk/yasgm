@@ -649,6 +649,34 @@ iced (open question).
       fixed rgba. Verified live: selection/segmented-control colors
       rendered as this Mac's actual (blue) system accent color, not the
       old purple, with no broken/black fallback rendering.
+  - **GUI: "Open save location" / "Open backups location": DONE
+    2026-07-21.** Two new CLI commands feeding two new buttons in the
+    detail panel: `yasgm paths <appid>` (JSON array of real, *existing*
+    resolved save directories — reuses the same `resolve::resolve_rule`/
+    `existing_matches`/`measure` calls `doctor` already uses) and `yasgm
+    backup-location <appid>` (`{"kind": "cloud"}` for OneDrive — there's no
+    local path, backups only exist via Graph API, D8/D13 — or
+    `{"kind": "local", "path": ...}` for the LocalFolder provider, which
+    also creates the directory so opening it can't fail on absence). The
+    GUI calls these then `tauri_plugin_opener`'s `open_path` to reveal the
+    result in Finder/Explorer. Verified live: "Open save location" opened
+    a real Finder window on the actual DOS2 `Savegames` directory; "Open
+    backups location" correctly showed "backups are stored in OneDrive
+    (cloud) — no local folder to open" rather than trying to open
+    anything, matching the current OneDrive provider. **Dev-workflow
+    gotcha found and worth remembering**: `tauri dev`'s
+    `beforeDevCommand` rebuilding `ui/src-tauri/binaries/yasgm-<triple>`
+    is not sufficient by itself to pick up CLI changes in an
+    already-running `tauri dev` session — Tauri's dev-mode sidecar staging
+    apparently copies that file into `ui/src-tauri/target/debug/yasgm`
+    once, and doesn't re-copy just because the source file's content
+    changed (no `cargo:rerun-if-changed` on it, seemingly). Symptom: the
+    running GUI calls a *stale* sidecar and a brand-new CLI subcommand
+    comes back "unknown command", even though invoking the rebuilt
+    `binaries/` file directly works fine. Fix: delete
+    `ui/src-tauri/target/debug/yasgm` and fully restart `tauri dev` (a
+    hot-reload isn't enough) whenever a `tauri dev` session needs to pick
+    up new sidecar-side (CLI) commands.
   Remaining in Phase 4: verify dark mode against real system dark mode
   (deferred once already this session; still outstanding), a native
   folder-picker dialog for the LocalFolder path (currently a plain text
