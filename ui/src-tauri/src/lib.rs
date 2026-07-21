@@ -131,6 +131,45 @@ fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())
 }
 
+/// Best-effort approximation of the user's real macOS accent color (System
+/// Settings > Appearance > Accent color). WebKit's CSS `AccentColor`/
+/// `AccentColorText` system-color keywords were tried first but don't
+/// reliably reflect it in this WKWebView — empirically they always render
+/// macOS's own default blue regardless of the actual setting (verified: a
+/// system set to Purple, `AppleAccentColor` = 5, still rendered blue). So
+/// instead this reads the same `AppleAccentColor` NSUserDefaults key AppKit
+/// itself reads and maps it against Apple's known, stable accent palette.
+/// `text` is always white, matching how macOS itself renders
+/// selection/accent-button text regardless of hue (not computed contrast).
+#[tauri::command]
+fn get_accent_color() -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    let accent = {
+        let index: Option<i32> = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleAccentColor"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok());
+        match index {
+            Some(-1) => "#8e8e93", // Graphite
+            Some(0) => "#ff3b30",  // Red
+            Some(1) => "#ff9500",  // Orange
+            Some(2) => "#ffcc00",  // Yellow
+            Some(3) => "#34c759",  // Green
+            Some(4) => "#007aff",  // Blue
+            Some(5) => "#af52de",  // Purple
+            Some(6) => "#ff2d55",  // Pink
+            _ => "#0a84ff",        // Multicolor, or key unset: macOS's own default
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let accent = "#0a84ff";
+
+    serde_json::json!({"accent": accent, "text": "#ffffff"})
+}
+
 // ---- settings: cloud provider + autostart ----------------------------
 
 /// `{"type": "onedrive"}` or `{"type": "local", "path": "..."}` (see
@@ -214,7 +253,8 @@ pub fn run() {
             set_autostart,
             get_save_paths,
             get_backup_location,
-            open_path
+            open_path,
+            get_accent_color
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show YASGM", true, None::<&str>)?;

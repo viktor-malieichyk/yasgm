@@ -26,21 +26,18 @@
   --badge-pinned-fg: #a05a00;
 
   /* System accent color (macOS: System Settings > Appearance > Accent
-     color), not a fixed brand color — supported since Safari 15.4, well
-     under our macOS 13 minimum. --accent-text is the color-scheme-aware
-     text color guaranteed to contrast against it. */
-  --accent: AccentColor;
-  --accent-text: AccentColorText;
+     color). The CSS `AccentColor`/`AccentColorText` system-color keywords
+     were tried first but don't reliably reflect the real setting in this
+     WKWebView (always rendered macOS's default blue regardless — verified
+     against a real Purple-accent system). main.js's loadAccentColor()
+     overrides these at runtime via `get_accent_color`, which reads the
+     real setting natively; these are just the fallback before that
+     resolves (and for non-macOS, where it's a static approximation). */
+  --accent: #0a84ff;
+  --accent-text: #ffffff;
 
   color: var(--fg);
   background-color: var(--bg);
-}
-
-@supports not (color: AccentColor) {
-  :root {
-    --accent: #646cff;
-    --accent-text: #ffffff;
-  }
 }
 
 @media (prefers-color-scheme: dark) {

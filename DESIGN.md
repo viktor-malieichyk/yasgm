@@ -677,6 +677,42 @@ iced (open question).
     `ui/src-tauri/target/debug/yasgm` and fully restart `tauri dev` (a
     hot-reload isn't enough) whenever a `tauri dev` session needs to pick
     up new sidecar-side (CLI) commands.
+  - **GUI: real system accent color (fixed, superseding the earlier
+    `AccentColor` attempt): DONE 2026-07-21.** The CSS `AccentColor`/
+    `AccentColorText` system-color keywords from the earlier attempt
+    turned out not to work — verified against a real system set to Purple
+    (`AppleAccentColor` = 5) and the UI kept rendering macOS's default
+    blue regardless. Replaced with a native query: `get_accent_color`
+    (Rust) shells out to `defaults read -g AppleAccentColor` (the same
+    NSUserDefaults key AppKit itself reads) and maps the index against
+    Apple's known, stable 8-color accent palette (Graphite/Red/Orange/
+    Yellow/Green/Blue/Purple/Pink; unset/multicolor falls back to macOS's
+    own default blue `#0a84ff`); `text` is always white, matching how
+    macOS itself renders selection/accent-button text regardless of hue
+    rather than computing per-color contrast. `main.js`'s
+    `loadAccentColor()` calls it once at startup and sets `--accent`/
+    `--accent-text` as inline styles on `<html>`, overriding the static
+    CSS fallback. Verified live (after tracking down a **second,
+    JS-side instance of the sidecar-caching-style gotcha**: `tauri dev`'s
+    frontend hot-reload did not reliably pick up the new `main.js` either
+    — confirmed by adding temporary status-bar debug output that never
+    appeared until a full `tauri dev` restart; treat "hot reload didn't
+    show my change" as gotcha-shaped from now on, not proof the change is
+    wrong): a real system set to Purple showed `accent color: #af52de` in
+    that debug output, and the selected game item / segmented control /
+    nav buttons all rendered visibly purple, matching the system's actual
+    accent swatch in System Settings > Appearance observed side-by-side.
+    **Incident during this verification pass**: at some point mid-session
+    the real `~/Library/LaunchAgents/dev.yasgm.watch.plist` ended up
+    installed and loaded (a real `watch --tray` daemon was actually
+    running, PID confirmed via `ps`) even though enabling autostart was
+    never a deliberate test step in this pass — mechanism not identified
+    (the Settings screen's autostart checkbox only fires on a genuine
+    `change` event, which programmatic `.checked` sets from
+    `loadAutostart()` shouldn't trigger). Caught by noticing the Settings
+    screen showing autostart on unexpectedly; fixed via `yasgm autostart
+    off`, confirmed the plist, launchctl entry, and daemon process were
+    all gone. Worth extra scrutiny if it recurs.
   Remaining in Phase 4: verify dark mode against real system dark mode
   (deferred once already this session; still outstanding), a native
   folder-picker dialog for the LocalFolder path (currently a plain text

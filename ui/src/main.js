@@ -73,6 +73,16 @@ function loadTheme() {
   applyTheme(localStorage.getItem(THEME_KEY) || "system");
 }
 
+async function loadAccentColor() {
+  try {
+    const { accent, text } = await invoke("get_accent_color");
+    document.documentElement.style.setProperty("--accent", accent);
+    document.documentElement.style.setProperty("--accent-text", text);
+  } catch {
+    // Static CSS fallback (--accent in styles.css) stays in effect.
+  }
+}
+
 function setStatus(text) {
   statusMsgEl.textContent = text;
 }
@@ -459,5 +469,6 @@ window.addEventListener("DOMContentLoaded", () => {
   autostartToggleEl.addEventListener("change", toggleAutostart);
 
   loadTheme();
+  loadAccentColor();
   loadGames();
 });
