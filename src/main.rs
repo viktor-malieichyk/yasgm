@@ -95,10 +95,10 @@ fn build_store(account: String, cfg: &config::Config) -> Result<Store> {
     match &cfg.provider {
         config::ProviderConfig::Onedrive => {
             let access_token = onedrive::ensure_access_token()?;
-            Ok(Store::new(Box::new(onedrive::OneDriveProvider::new(access_token)), account))
+            Store::new(Box::new(onedrive::OneDriveProvider::new(access_token)), account)
         }
         config::ProviderConfig::Local { path } => {
-            Ok(Store::new(Box::new(local::LocalFolderProvider::new(path.clone())), account))
+            Store::new(Box::new(local::LocalFolderProvider::new(path.clone())), account)
         }
     }
 }
@@ -492,13 +492,10 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
                 println!("{}: no saves locally or in cloud", game.name)
             }
             sync::Outcome::InSync => println!("{}: in sync", game.name),
-            sync::Outcome::Uploaded(v) => println!(
-                "{}: uploaded version {} ({} files, {})",
-                game.name,
-                v.id,
-                v.files,
-                human_bytes(v.size)
-            ),
+            sync::Outcome::Uploaded(v) => {
+                let verb = if v.pending { "backed up locally (pending — offline)" } else { "uploaded" };
+                println!("{}: {verb} version {} ({} files, {})", game.name, v.id, v.files, human_bytes(v.size))
+            }
             sync::Outcome::Downloaded { version, files_written, local_preserved_as } => {
                 if let Some(preserved) = local_preserved_as {
                     println!("{}: previous local state preserved as pinned version {preserved}", game.name);
@@ -513,11 +510,14 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
                  `yasgm restore {} --version {}`",
                 game.name, v.id, game.app_id, v.id
             ),
-            sync::Outcome::Conflict { uploaded, pinned } => println!(
-                "{}: CONFLICT — local uploaded as active version {}; previous cloud head pinned \
-                 as {} (kept until you delete it: `yasgm rm {} {}`)",
-                game.name, uploaded.id, pinned, game.app_id, pinned
-            ),
+            sync::Outcome::Conflict { uploaded, pinned } => {
+                let verb = if uploaded.pending { "saved locally (pending — offline) as" } else { "uploaded as" };
+                println!(
+                    "{}: CONFLICT — local {verb} active version {}; previous cloud head pinned \
+                     as {} (kept until you delete it: `yasgm rm {} {}`)",
+                    game.name, uploaded.id, pinned, game.app_id, pinned
+                )
+            }
             sync::Outcome::DryRun(what) => println!("{}: {what}", game.name),
         }
 
@@ -866,6 +866,11 @@ fn backup_cmd(args: &[String]) -> Result<()> {
             continue;
         }
         let keep = cfg.game(game.app_id).keep.unwrap_or(store::DEFAULT_KEEP);
+        // Best-effort: catch up any pending (offline) backups before doing
+        // anything else — see the matching comment in sync::sync_game.
+        if !dry_run {
+            let _ = store.flush_pending(game.app_id, keep);
+        }
         match snapshot::capture(&merged.files, game, ctx.os)? {
             None => println!("{}: no save files on this machine", game.name),
             Some(snap) => {
@@ -887,8 +892,9 @@ fn backup_cmd(args: &[String]) -> Result<()> {
                 } else {
                     match store.push(&game.name, game.app_id, &snap, ctx.os.name(), keep, false) {
                         Ok(version) => {
+                            let verb = if version.pending { "backed up locally (pending — offline)" } else { "uploaded" };
                             println!(
-                                "{}: uploaded version {} ({} files, {})",
+                                "{}: {verb} version {} ({} files, {})",
                                 game.name,
                                 version.id,
                                 version.files,
@@ -951,10 +957,13 @@ fn versions_cmd(args: &[String]) -> Result<()> {
                     "size": v.size,
                     "pinned": v.pinned,
                     "active": active,
+                    "pending": v.pending,
                 }));
                 continue;
             }
-            let marker = if active {
+            let marker = if v.pending {
+                " [pending — offline, not yet synced]"
+            } else if active {
                 " [active]"
             } else if v.pinned {
                 " [pinned]"
@@ -1191,7 +1200,7 @@ fn selftest() -> Result<()> {
     let store = Store::new(
         Box::new(onedrive::OneDriveProvider::new(access_token.clone())),
         "selftest".to_owned(),
-    );
+    )?;
 
     println!("1/7 capture + upload…");
     let snap = snapshot::capture(&files, &game, os)?.context("capture found nothing")?;

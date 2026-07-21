@@ -24,6 +24,8 @@
   --badge-active-fg: #1e7e34;
   --badge-pinned-bg: rgba(255, 152, 0, 0.18);
   --badge-pinned-fg: #a05a00;
+  --badge-pending-bg: rgba(128, 128, 128, 0.18);
+  --badge-pending-fg: #5a5a5a;
 
   /* System accent color (macOS: System Settings > Appearance > Accent
      color). The CSS `AccentColor`/`AccentColorText` system-color keywords
@@ -53,6 +55,8 @@
     --badge-active-fg: #6fe08a;
     --badge-pinned-bg: rgba(255, 152, 0, 0.28);
     --badge-pinned-fg: #ffb85c;
+    --badge-pending-bg: rgba(200, 200, 200, 0.28);
+    --badge-pending-fg: #d0d0d0;
   }
 }
 
@@ -68,6 +72,8 @@
   --badge-active-fg: #6fe08a;
   --badge-pinned-bg: rgba(255, 152, 0, 0.28);
   --badge-pinned-fg: #ffb85c;
+  --badge-pending-bg: rgba(200, 200, 200, 0.28);
+  --badge-pending-fg: #d0d0d0;
 }
 
 body {
@@ -340,6 +346,11 @@ button:disabled {
 .badge.pinned {
   background-color: var(--badge-pinned-bg);
   color: var(--badge-pinned-fg);
+}
+
+.badge.pending {
+  background-color: var(--badge-pending-bg);
+  color: var(--badge-pending-fg);
 }
 
 #status-msg {

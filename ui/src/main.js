@@ -260,9 +260,15 @@ function renderVersionRow(v) {
 
   const info = document.createElement("div");
   info.className = "version-info";
-  const badge = v.active ? '<span class="badge active">active</span>' : v.pinned ? '<span class="badge pinned">pinned</span>' : "";
+  const badges = [
+    v.active && '<span class="badge active">active</span>',
+    v.pinned && '<span class="badge pinned">pinned</span>',
+    v.pending && '<span class="badge pending" title="Saved locally — not yet synced to the cloud">pending — offline</span>',
+  ]
+    .filter(Boolean)
+    .join(" ");
   info.innerHTML = `
-    <div>${humanDate(v.created)} ${badge}</div>
+    <div>${humanDate(v.created)} ${badges}</div>
     <div class="muted">${v.machine} · ${v.os} · ${v.files} files · ${humanBytes(v.size)}</div>
   `;
   row.appendChild(info);

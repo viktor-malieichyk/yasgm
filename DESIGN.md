@@ -33,6 +33,7 @@ Steam games only; no Proton/CrossOver on Mac in scope).
 | D15 | Per-game control | `mode: sync | backup-only | off` per game. Default: `sync`; auto-downgraded to `backup-only` when Steam Cloud is detected. |
 | D16 | Apple Developer signing | Deferred — ship unsigned macOS builds initially. |
 | D17 | Name | **"Yet another save game manager" (YASGM)** (decided 2026-07-17, replacing earlier *Bonfire* pick). Binary `yasgm`, OneDrive folder `Apps/YASGM/`, wrapper `yasgm run -- %command%`. Availability checked 2026-07-17: no crates.io crate, no GitHub project with the name — fully free. |
+| D18 | Offline mode | If the primary provider is unreachable, snapshots fall back to a **local pending store** (fixed path, not the D13 user-configurable one) instead of failing outright. Pending versions are **visible and restorable** (not just a silent queue) — merged into the normal version list with a `pending` flag — and auto-flush into the primary provider at the start of the next sync/backup run. |
 
 ## Open questions
 
@@ -713,6 +714,55 @@ iced (open question).
     screen showing autostart on unexpectedly; fixed via `yasgm autostart
     off`, confirmed the plist, launchctl entry, and daemon process were
     all gone. Worth extra scrutiny if it recurs.
+  - **Offline mode (D18): DONE 2026-07-21.** `Store` (`src/store.rs`) now
+    owns a second provider internally — `pending`, a `LocalFolderProvider`
+    rooted at a fixed path (`dirs::data_dir()/yasgm/pending`, independent
+    of whatever primary provider the user configured) — instead of just
+    wrapping one. `load_index` merges both providers' indices, tagging
+    pending entries via a new `Version::pending` flag that's set only
+    in-memory by the merge (`#[serde(skip_serializing)]` — never written to
+    either provider's own index.json, since which store a version is in
+    already implies it). `push_raw` tries the primary provider first and
+    falls back to `pending` on *any* failure (network, expired auth,
+    quota — no attempt to distinguish reasons, since from the user's
+    perspective "couldn't reach the cloud right now" should always have
+    the same safety net); `download_version`/`set_pinned`/`remove_version`
+    resolve to whichever provider actually holds the version. A public
+    `flush_pending` moves stranded pending versions into primary and is
+    called explicitly at the start of `sync_game`/`backup_cmd` — not just
+    relied on via `push_raw`'s own internal call — because a game whose
+    save content hasn't changed since a prior offline backup never reaches
+    `push_raw` at all (callers short-circuit on "unchanged"), so without
+    an explicit call a pending version could sit stranded indefinitely
+    even after connectivity returns (**found this gap live**: after
+    forcing an offline backup then restoring primary access, a second
+    `backup` run reported "unchanged since last version" and did nothing
+    — fixed by adding the explicit `flush_pending` calls). `versions_cmd`
+    gained a `pending` field in both its JSON and human output (`[pending
+    — offline, not yet synced]`); `backup_cmd`/`run_sync`'s success
+    messages now say "backed up locally (pending — offline)" instead of
+    "uploaded" when the fallback path was taken (also found live — the
+    first version of this printed "uploaded" even when the write actually
+    went to local pending, since the CLI's own status message didn't check
+    the returned `Version::pending`). GUI: `main.js` renders a gray
+    "pending — offline" badge alongside active/pinned on any pending
+    version row; Restore/Pin/Delete work on pending versions with no GUI
+    changes needed beyond the badge, since `Store`'s public method
+    signatures didn't change — the dual-provider logic is entirely
+    internal to `store.rs`. Unit-tested (3 new tests in `src/store.rs`,
+    using a test-only `AlwaysFailProvider` to simulate "primary
+    unreachable" without a real network outage): fallback marks the
+    version pending and it's downloadable; a stranded pending version gets
+    flushed into primary on the next push; pin/unpin/rm resolve to
+    whichever store actually holds a version even when primary is
+    down. Verified live end-to-end against real disk I/O (LocalFolder
+    provider with write permission revoked via `chmod 000` to force real
+    failures, not just a mock): a real `backup` fell back to a local
+    pending version, `versions --json` showed it with `pending: true` as
+    the active head, a same-content second `backup` while still "offline"
+    correctly did nothing new, restoring permissions and backing up again
+    flushed it into primary (confirmed on disk and via `pending: false`),
+    and the GUI badge rendered correctly against this same real scenario.
   Remaining in Phase 4: verify dark mode against real system dark mode
   (deferred once already this session; still outstanding), a native
   folder-picker dialog for the LocalFolder path (currently a plain text

@@ -49,6 +49,14 @@ pub fn sync_game(
     keep: usize,
     dry_run: bool,
 ) -> Result<(Outcome, StateUpdate)> {
+    // Best-effort: catch up any versions stranded locally from a previous
+    // offline run before doing anything else, so a game whose save content
+    // hasn't changed since (and so never reaches store.push below) still
+    // gets its pending backup synced once connectivity returns.
+    if !dry_run {
+        let _ = store.flush_pending(game.app_id, keep);
+    }
+
     let local = snapshot::capture(files, game, os)?;
     let index = store.load_index(game.app_id)?;
     let head = index.as_ref().and_then(Store::head).cloned();
