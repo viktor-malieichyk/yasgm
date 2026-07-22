@@ -763,10 +763,18 @@ iced (open question).
     correctly did nothing new, restoring permissions and backing up again
     flushed it into primary (confirmed on disk and via `pending: false`),
     and the GUI badge rendered correctly against this same real scenario.
-  Remaining in Phase 4: verify dark mode against real system dark mode
-  (deferred once already this session; still outstanding), a native
-  folder-picker dialog for the LocalFolder path (currently a plain text
-  input), self-update, additional cloud providers beyond
+  - **GUI: dark mode verified live: DONE 2026-07-21.** Toggled real macOS
+    system appearance to Dark (was Light; reverted after) and checked both
+    views: Library (games sidebar, selected-item highlight, version rows,
+    active/pinned badges, disabled-button dimming) and Settings (segmented
+    Appearance control, provider/autostart sections) all render with
+    legible text/borders/inputs. Incidentally reconfirmed the accent-color
+    fix is live/dynamic rather than cached: the system's accent had
+    changed from Purple to Green since it was last checked, and the
+    segmented control picked that up correctly with no code changes.
+  Remaining in Phase 4: a native folder-picker dialog for the
+  LocalFolder path (currently a plain text input), self-update,
+  additional cloud providers beyond
   OneDrive/LocalFolder.
 
 ## Risks
