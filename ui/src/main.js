@@ -13,6 +13,7 @@ let keepInputEl;
 let saveBtnEl;
 let resetBtnEl;
 let openSavesBtnEl;
+let openProviderBtnEl;
 let openBackupsBtnEl;
 let openLocationMsgEl;
 let versionsListEl;
@@ -29,6 +30,7 @@ let providerOnedriveBtnEl;
 let providerAuthBtnEl;
 let providerAuthMsgEl;
 let providerLocalPathEl;
+let providerLocalBrowseBtnEl;
 let providerLocalBtnEl;
 let autostartToggleEl;
 let autostartDetailEl;
@@ -217,16 +219,36 @@ async function openSaveLocation() {
   }
 }
 
+// Opens wherever backups actually live on the *primary* provider: a local
+// folder for LocalFolder, or a real OneDrive web link for OneDrive (falls
+// back to the app's OneDrive root if this game has no backups yet).
+async function openProviderLocation() {
+  if (selectedAppId === null) return;
+  openLocationMsgEl.textContent = "looking for cloud provider location…";
+  try {
+    const loc = await invoke("get_backup_location", { appId: selectedAppId });
+    if (loc.kind === "cloud") {
+      if (!loc.url) {
+        openLocationMsgEl.textContent = "couldn't find a OneDrive link for this game";
+        return;
+      }
+      await invoke("open_url", { url: loc.url });
+    } else {
+      await invoke("open_path", { path: loc.path });
+    }
+    openLocationMsgEl.textContent = "";
+  } catch (err) {
+    openLocationMsgEl.textContent = `couldn't open cloud provider location: ${err}`;
+  }
+}
+
+// Shown only when the currently loaded versions include a pending
+// (offline, unsynced) one — see loadVersions().
 async function openBackupsLocation() {
   if (selectedAppId === null) return;
   openLocationMsgEl.textContent = "looking for backups location…";
   try {
-    const loc = await invoke("get_backup_location", { appId: selectedAppId });
-    if (loc.kind === "cloud") {
-      openLocationMsgEl.textContent =
-        "backups are stored in OneDrive (cloud) — no local folder to open";
-      return;
-    }
+    const loc = await invoke("get_pending_location", { appId: selectedAppId });
     await invoke("open_path", { path: loc.path });
     openLocationMsgEl.textContent = "";
   } catch (err) {
@@ -239,6 +261,7 @@ async function openBackupsLocation() {
 async function loadVersions() {
   if (selectedAppId === null) return;
   versionsListEl.innerHTML = "";
+  openBackupsBtnEl.classList.add("hidden");
   try {
     const versions = await invoke("list_versions", { appId: selectedAppId });
     if (versions.length === 0) {
@@ -249,6 +272,7 @@ async function loadVersions() {
     for (const v of versions) {
       versionsListEl.appendChild(renderVersionRow(v));
     }
+    openBackupsBtnEl.classList.toggle("hidden", !versions.some((v) => v.pending));
   } catch (err) {
     setStatus(`error loading versions: ${err}`);
   }
@@ -380,6 +404,17 @@ async function signInOnedrive() {
   }
 }
 
+async function browseLocalFolder() {
+  try {
+    const path = await invoke("pick_local_folder");
+    if (path) {
+      providerLocalPathEl.value = path;
+    }
+  } catch (err) {
+    setStatus(`folder picker failed: ${err}`);
+  }
+}
+
 async function useLocalFolder() {
   const path = providerLocalPathEl.value.trim();
   if (!path) {
@@ -432,6 +467,7 @@ window.addEventListener("DOMContentLoaded", () => {
   saveBtnEl = document.querySelector("#save-btn");
   resetBtnEl = document.querySelector("#reset-btn");
   openSavesBtnEl = document.querySelector("#open-saves-btn");
+  openProviderBtnEl = document.querySelector("#open-provider-btn");
   openBackupsBtnEl = document.querySelector("#open-backups-btn");
   openLocationMsgEl = document.querySelector("#open-location-msg");
   versionsListEl = document.querySelector("#versions-list");
@@ -448,6 +484,7 @@ window.addEventListener("DOMContentLoaded", () => {
   providerAuthBtnEl = document.querySelector("#provider-auth-btn");
   providerAuthMsgEl = document.querySelector("#provider-auth-msg");
   providerLocalPathEl = document.querySelector("#provider-local-path");
+  providerLocalBrowseBtnEl = document.querySelector("#provider-local-browse-btn");
   providerLocalBtnEl = document.querySelector("#provider-local-btn");
   autostartToggleEl = document.querySelector("#autostart-toggle");
   autostartDetailEl = document.querySelector("#autostart-detail");
@@ -455,6 +492,7 @@ window.addEventListener("DOMContentLoaded", () => {
   saveBtnEl.addEventListener("click", saveSelectedGame);
   resetBtnEl.addEventListener("click", resetSelectedGame);
   openSavesBtnEl.addEventListener("click", openSaveLocation);
+  openProviderBtnEl.addEventListener("click", openProviderLocation);
   openBackupsBtnEl.addEventListener("click", openBackupsLocation);
 
   navLibraryEl.addEventListener("click", () => showView("library"));
@@ -471,6 +509,7 @@ window.addEventListener("DOMContentLoaded", () => {
   providerCheckBtnEl.addEventListener("click", checkProviderStatus);
   providerOnedriveBtnEl.addEventListener("click", useOnedrive);
   providerAuthBtnEl.addEventListener("click", signInOnedrive);
+  providerLocalBrowseBtnEl.addEventListener("click", browseLocalFolder);
   providerLocalBtnEl.addEventListener("click", useLocalFolder);
   autostartToggleEl.addEventListener("change", toggleAutostart);
 

@@ -405,21 +405,38 @@ fn paths_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Where this game's backups actually live on disk, if anywhere — only the
-/// LocalFolder provider has one (OneDrive backups have no local path, D8/
-/// D13). Used by the GUI's "Open backups location" button; creates the
-/// directory if it doesn't exist yet so opening it never fails on absence.
+/// Where this game's backups actually live on the *primary* provider (D8) —
+/// a local path for LocalFolder, or a real OneDrive web link for OneDrive
+/// (fetched via Graph's `webUrl`, since there's no local folder to open;
+/// D13). Used by the GUI's "Open in cloud provider" button; the local
+/// branch also creates the directory so opening it never fails on absence.
 fn backup_location_cmd(args: &[String]) -> Result<()> {
     let app_id = parse_app_id(args).context("usage: yasgm backup-location <appid>")?;
     let cfg = config::Config::load();
+    let root = steam::find_steam_root().context("Steam installation not found")?;
+    let account = steam::account_ids(&root)
+        .into_iter()
+        .next()
+        .context("no Steam account found in userdata")?;
     let json = match &cfg.provider {
-        config::ProviderConfig::Onedrive => serde_json::json!({"kind": "cloud"}),
+        config::ProviderConfig::Onedrive => {
+            let access_token = onedrive::ensure_access_token()?;
+            let rel = format!("accounts/{account}/games/{app_id}");
+            let web_url = onedrive::item_get(&access_token, &rel)?
+                .and_then(|item| item["webUrl"].as_str().map(str::to_owned));
+            // No backups made yet for this game: fall back to the app's
+            // OneDrive root folder (always exists — Graph auto-creates it)
+            // rather than a dead end.
+            let web_url = match web_url {
+                Some(url) => Some(url),
+                None => onedrive::graph_get(&access_token, "/me/drive/special/approot")?
+                    ["webUrl"]
+                    .as_str()
+                    .map(str::to_owned),
+            };
+            serde_json::json!({"kind": "cloud", "url": web_url})
+        }
         config::ProviderConfig::Local { path } => {
-            let root = steam::find_steam_root().context("Steam installation not found")?;
-            let account = steam::account_ids(&root)
-                .into_iter()
-                .next()
-                .context("no Steam account found in userdata")?;
             let game_dir = path.join(format!("accounts/{account}/games/{app_id}"));
             std::fs::create_dir_all(&game_dir)
                 .with_context(|| format!("creating {}", game_dir.display()))?;
@@ -427,6 +444,25 @@ fn backup_location_cmd(args: &[String]) -> Result<()> {
         }
     };
     println!("{}", serde_json::to_string(&json)?);
+    Ok(())
+}
+
+/// Where any offline-pending (unsynced) backups for this game currently
+/// live (D18) — a fixed local path independent of whichever cloud provider
+/// is configured, since the pending store always exists as a fallback.
+/// Used by the GUI's "Open backups location" button, shown only when this
+/// game actually has pending versions (see `versions --json`'s `pending`
+/// field) rather than unconditionally.
+fn pending_location_cmd(args: &[String]) -> Result<()> {
+    let app_id = parse_app_id(args).context("usage: yasgm pending-location <appid>")?;
+    let root = steam::find_steam_root().context("Steam installation not found")?;
+    let account = steam::account_ids(&root)
+        .into_iter()
+        .next()
+        .context("no Steam account found in userdata")?;
+    let dir = store::pending_dir()?.join(format!("accounts/{account}/games/{app_id}"));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    println!("{}", serde_json::to_string(&serde_json::json!({"path": dir}))?);
     Ok(())
 }
 
@@ -1332,6 +1368,7 @@ fn main() -> Result<()> {
         Some("provider") => provider_cmd(&args),
         Some("paths") => paths_cmd(&args),
         Some("backup-location") => backup_location_cmd(&args),
+        Some("pending-location") => pending_location_cmd(&args),
         Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
@@ -1349,6 +1386,7 @@ fn main() -> Result<()> {
                  watch [--settle <secs>] [--tray]\n  autostart [on|off|status] [--json]\n  \
                  provider [onedrive|local <path>|status] [--json]\n  \
                  paths <appid>\n  backup-location <appid>\n  \
+                 pending-location <appid>\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \

@@ -111,7 +111,7 @@ pub fn machine_name() -> String {
 /// Fixed (not user-configurable) local fallback location for versions that
 /// couldn't reach the primary provider — always outside any cloud-synced
 /// folder since it's not somewhere the user points a sync client at (D13).
-fn pending_dir() -> Result<PathBuf> {
+pub fn pending_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .context("no data directory on this platform")?
         .join("yasgm/pending");

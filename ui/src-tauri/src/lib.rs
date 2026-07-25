@@ -14,6 +14,7 @@
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_shell::ShellExt;
 
@@ -116,9 +117,14 @@ async fn get_save_paths(app: AppHandle, app_id: u64) -> Result<Vec<serde_json::V
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
 }
 
-/// `{"kind": "cloud"}` (OneDrive — no local path) or `{"kind": "local",
-/// "path": "..."}` (LocalFolder provider; see `backup_location_cmd` in
-/// main.rs, which also creates the directory so opening it never fails).
+/// Where this game's backups live on the *primary* provider (D8):
+/// `{"kind": "cloud", "url": "https://..."}` (OneDrive — a real Graph
+/// `webUrl` for the game's folder, or the app's OneDrive root if this game
+/// has no backups yet) or `{"kind": "local", "path": "..."}` (LocalFolder
+/// provider, directory created if missing); see `backup_location_cmd` in
+/// main.rs. Used by the GUI's "Open in cloud provider" button — distinct
+/// from `get_pending_location`, which is always local (D18's offline
+/// fallback store).
 #[tauri::command]
 async fn get_backup_location(app: AppHandle, app_id: u64) -> Result<serde_json::Value, String> {
     let app_id = app_id.to_string();
@@ -126,9 +132,25 @@ async fn get_backup_location(app: AppHandle, app_id: u64) -> Result<serde_json::
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
 }
 
+/// `{"path": "..."}` — where any offline-pending (unsynced) backups for
+/// this game currently live (D18); see `pending_location_cmd` in main.rs.
+/// Always a real local path, regardless of which cloud provider is
+/// configured, since the pending store is a fixed fallback location.
+#[tauri::command]
+async fn get_pending_location(app: AppHandle, app_id: u64) -> Result<serde_json::Value, String> {
+    let app_id = app_id.to_string();
+    let stdout = run_yasgm(&app, &["pending-location", &app_id]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
 #[tauri::command]
 fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    app.opener().open_url(url, None::<&str>).map_err(|err| err.to_string())
 }
 
 /// Best-effort approximation of the user's real macOS accent color (System
@@ -190,6 +212,20 @@ async fn set_provider_local(app: AppHandle, path: String) -> Result<String, Stri
     run_yasgm(&app, &["provider", "local", &path]).await
 }
 
+/// Native folder picker for the LocalFolder path field. `None` if the user
+/// cancelled. The dialog plugin's API is callback-based (it has to run on
+/// the main thread on macOS), so this bridges it into the async command
+/// with a plain channel; blocking the task while the modal is open is fine
+/// since that's the whole point of asking the user to pick something.
+#[tauri::command]
+async fn pick_local_folder(app: AppHandle) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
+    rx.recv().ok().flatten().map(|f| f.to_string())
+}
+
 /// Runs the real connectivity check (Graph app-folder probe for OneDrive,
 /// directory read/write probe for LocalFolder).
 #[tauri::command]
@@ -236,6 +272,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_versions,
             restore_version,
@@ -247,13 +284,16 @@ pub fn run() {
             get_provider,
             set_provider_onedrive,
             set_provider_local,
+            pick_local_folder,
             cloud_status,
             cloud_auth,
             get_autostart,
             set_autostart,
             get_save_paths,
             get_backup_location,
+            get_pending_location,
             open_path,
+            open_url,
             get_accent_color
         ])
         .setup(|app| {

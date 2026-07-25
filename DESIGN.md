@@ -772,9 +772,59 @@ iced (open question).
     fix is live/dynamic rather than cached: the system's accent had
     changed from Purple to Green since it was last checked, and the
     segmented control picked that up correctly with no code changes.
-  Remaining in Phase 4: a native folder-picker dialog for the
-  LocalFolder path (currently a plain text input), self-update,
-  additional cloud providers beyond
+  - **GUI: native folder picker, and "open location" buttons split into
+    save/pending/cloud-provider: DONE 2026-07-25.**
+    - **Folder picker**: added `tauri-plugin-dialog`; a new `pick_local_folder`
+      Tauri command bridges its callback-based `DialogExt::pick_folder` API
+      into an async command via a plain `std::sync::mpsc` channel (blocking
+      the task while the modal is open is fine — that's the whole point).
+      A "Browse…" button between the LocalFolder path input and "Use this
+      folder" populates the field; the text input stays editable too.
+      Verified live: a real NSOpenPanel opened as a sheet on the window and
+      browsing showed the real filesystem (including the real `Larian
+      Studios` folder under Documents).
+    - **"Open backups location" repurposed** to open the local *pending*
+      (D18, offline/unsynced) folder specifically, shown only when the
+      selected game actually has a pending version — reusing the
+      already-fetched `list_versions` data's `pending` flag rather than a
+      separate check. New `yasgm pending-location <appid>` CLI command
+      (always a real local path, since the pending store is a fixed
+      fallback regardless of provider) and `get_pending_location` Tauri
+      command. Verified live: visible for DOS2 after forcing an offline
+      backup, hidden for Terraforming Mars (no pending versions).
+    - **New "Open in cloud provider" button** — what "Open backups
+      location" used to do before the repurposing above, restored as its
+      own clearly-named button: opens the *primary* provider's actual
+      backup location. For LocalFolder, the local folder (unchanged
+      `backup_location_cmd` local branch). For OneDrive, previously a
+      dead-end `{"kind": "cloud"}` message — now fetches a real Graph
+      `webUrl` for the game's folder via `onedrive::item_get` and opens it
+      in the browser via a new `open_url` Tauri command
+      (`OpenerExt::open_url`); falls back to the app's OneDrive root
+      folder's `webUrl` if this game has no backups yet, so it's never a
+      dead end. Verified live against the real account: opened Chrome to
+      `onedrive.live.com/my?id=.../Apps/YASGM/accounts/.../games/435150` —
+      the exact real folder, confirmed via `Google Chrome`'s active tab
+      URL.
+    - **Incident during this verification pass**: while testing the
+      folder-picker dialog, the real provider config ended up switched to
+      LocalFolder pointing at a never-intended path
+      (`~/Documents/_save_sync`, which also got created), even though the
+      only actions taken were opening the picker and clicking "Open" in
+      it — "Use this folder" was never knowingly clicked. Mechanism not
+      identified (osascript click commands returned AX-resolution errors
+      immediately before and after, suggesting some clicks landed
+      ambiguously across rapid retries with slightly different
+      accessibility paths); fixed by reverting the provider to OneDrive
+      and removing the stray folder. Given this is the third such
+      unexplained real-state side effect from automated UI-testing clicks
+      this project (after an `/Applications` copy during macOS packaging
+      and an autostart LaunchAgent getting enabled), subsequent testing
+      switched to single deliberate clicks with the AX path confirmed
+      *before* clicking, rather than rapid alternate-path retries after an
+      error — worth keeping as the default approach for any future
+      mutating-action GUI verification.
+  Remaining in Phase 4: self-update, additional cloud providers beyond
   OneDrive/LocalFolder.
 
 ## Risks
