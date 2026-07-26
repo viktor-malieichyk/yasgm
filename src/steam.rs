@@ -62,6 +62,16 @@ pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(libs)
 }
 
+/// Steam appids for shared prerequisite/runtime installs that show up as
+/// ordinary `appmanifest_*.acf` entries alongside real games but aren't
+/// games themselves, so they'd otherwise appear as permanently
+/// "not in manifest" rows. Steam gives no reliable type flag in the ACF
+/// itself (that lives in the binary appinfo.vdf), so this is a denylist of
+/// known IDs rather than a general classifier.
+const NON_GAME_APP_IDS: &[u64] = &[
+    228980, // Steamworks Common Redistributables
+];
+
 pub fn installed_games(libraries: &[PathBuf]) -> Result<Vec<InstalledGame>> {
     let mut games = Vec::new();
     for library in libraries {
@@ -93,6 +103,9 @@ pub fn installed_games(libraries: &[PathBuf]) -> Result<Vec<InstalledGame>> {
             let Some(app_id) = vdf::get_str(state, "appid").and_then(|s| s.parse().ok()) else {
                 continue;
             };
+            if NON_GAME_APP_IDS.contains(&app_id) {
+                continue;
+            }
             games.push(InstalledGame {
                 app_id,
                 name: vdf::get_str(state, "name").unwrap_or("?").to_owned(),
