@@ -375,8 +375,28 @@ iced (open question).
     resolve, capture, sync (stable in-sync across runs), and dry-run-restore
     correctly; selftest's full capture→upload→restore roundtrip runs
     natively on macOS. Remaining macOS work is packaging only (Phase 4).
-  Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
-  Proton path mapping, cross-OS normalization, Flatpak packaging.
+  - **Proton path mapping: unit-tested 2026-07-26**, upgrading the above
+    code review to something executable — none of `resolve.rs`'s mapping
+    logic is gated by `cfg(target_os = ...)`, it's pure string substitution
+    parameterized by the `Os` enum, so it's testable on any machine against
+    a hand-built fake Steam library (`steamapps/compatdata/<appid>/pfx/
+    drive_c/users/steamuser/...`), no real Proton prefix or Linux box
+    needed. Four tests added to `src/resolve.rs`: a Windows-only rule maps
+    into the compatdata prefix correctly (verified both the resulting
+    string *and* that `existing_matches` finds a real directory created at
+    that exact path); an embedded wildcard (`Slot<storeUserId>Data`,
+    mirroring DOS2's real manifest shape, not a whole-segment wildcard)
+    still resolves and globs to a real directory through the Proton
+    prefix; macOS never claims `Via::Proton` for a Windows-only rule
+    (reports out-of-scope instead, matching the already-live macOS
+    behavior); and an unconstrained/native rule on Linux is never routed
+    through the Proton prefix at all. What this still can't cover: real
+    Wine/Proton actually writing files there, or SteamOS-specific quirks —
+    only that YASGM's own mapping arithmetic is correct, which was the
+    part previously resting on code review alone.
+  Remaining in Phase 2 (needs SteamOS/Linux hardware to validate): running
+  the above against a real Proton prefix end-to-end, cross-OS
+  normalization, Flatpak packaging.
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
   macOS; Linux paths written but unvalidated per 2026-07-20 direction).
   - **Launch-wrapper mode: DONE 2026-07-20.** `yasgm run [--app <id>] --
