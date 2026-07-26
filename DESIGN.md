@@ -844,6 +844,25 @@ iced (open question).
       *before* clicking, rather than rapid alternate-path retries after an
       error — worth keeping as the default approach for any future
       mutating-action GUI verification.
+  - **GUI: icon redesign — dark squircle main icon, clean tray silhouette:
+    DONE 2026-07-26.** The main icon's background changed from a light-blue
+    gradient rounded square to a Steam-style dark navy-to-black squircle
+    (`#1b2838` → `#0d0d0d`-ish), keeping the cloud+gamepad+sync-arrows
+    motif recolored for contrast. The tray icon went through two passes:
+    the first attempt (body + two plain grip circles) read as sunglasses/
+    a dumbbell at real tray sizes, not a controller — replaced with a
+    front-view controller silhouette (flat-topped body, two round grips
+    drooping down with a visible notch between them), which reads clearly
+    as a gamepad down to 16px; the main icon's gamepad glyph was updated
+    to the same silhouette for consistency between the two. Regenerated
+    via the same `npx tauri icon` + iOS/Android/Windows-Store-file-cleanup
+    process as the original icon work. Verified live: real menu-bar
+    screenshot (zoomed to actual pixels, not just the PIL preview) shows
+    the controller shape rendering as designed. Also hit one purely
+    testing-side flake while verifying (window took a beat to appear on
+    one launch, immediately clicking "Show" or just waiting resolved it
+    every other time) — not reproduced across a clean 8-second polling
+    run, treated as automation timing noise rather than a product bug.
   Remaining in Phase 4: self-update, additional cloud providers beyond
   OneDrive/LocalFolder.
 
