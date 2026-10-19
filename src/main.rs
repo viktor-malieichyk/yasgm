@@ -5,6 +5,7 @@
 mod autostart;
 mod config;
 mod local;
+mod lock;
 mod manifest;
 mod onedrive;
 mod provider;
@@ -670,7 +671,34 @@ enum WatchCommand {
 
 /// Daemon entry: headless by default, `--tray` adds a status icon with
 /// Sync now / Pause / Quit (Windows + macOS; Linux tray pending).
+/// `watch status [--json]` reports whether a daemon is running instead.
 fn watch_cmd(args: &[String]) -> Result<()> {
+    if positionals(args).first().map(String::as_str) == Some("status") {
+        let running = lock::daemon_status()?;
+        if flag(args, "--json") {
+            println!(
+                "{}",
+                serde_json::json!({"running": running.is_some(), "pid": running.flatten()})
+            );
+        } else {
+            match running {
+                Some(Some(pid)) => println!("watch daemon: running (pid {pid})"),
+                Some(None) => println!("watch daemon: running"),
+                None => println!("watch daemon: not running"),
+            }
+        }
+        return Ok(());
+    }
+    // Held until this function returns, i.e. for the daemon's whole life
+    // (tray mode runs its event loop inside tray_main).
+    let _lock = match lock::acquire_daemon() {
+        Ok(lock) => lock,
+        Err(err) if err.is::<lock::AlreadyRunning>() => {
+            eprintln!("yasgm: {err} — not starting a second one");
+            std::process::exit(3);
+        }
+        Err(err) => return Err(err),
+    };
     let settle = std::time::Duration::from_secs(
         flag_value(args, "--settle").and_then(|s| s.parse().ok()).unwrap_or(10),
     );
@@ -1383,7 +1411,7 @@ fn main() -> Result<()> {
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 watch [--settle <secs>] [--tray]\n  autostart [on|off|status] [--json]\n  \
+                 watch [--settle <secs>] [--tray] | watch status [--json]\n  autostart [on|off|status] [--json]\n  \
                  provider [onedrive|local <path>|status] [--json]\n  \
                  paths <appid>\n  backup-location <appid>\n  \
                  pending-location <appid>\n  \

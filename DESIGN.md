@@ -1,7 +1,7 @@
 # YASGM (Yet Another Save Game Manager) — Design Document
 
 > **Living document.** Updated whenever a decision is made or the plan changes.
-> Last updated: 2026-07-20
+> Last updated: 2026-10-19
 
 ## Vision
 
@@ -31,16 +31,21 @@ Steam games only; no Proton/CrossOver on Mac in scope).
 | D13 | Data location | User chooses where local data (staging/backups) lives. See [Local data location](#local-data-location) for cloud-folder caveats. State DB always stays outside cloud-synced folders. |
 | D14 | Non-destructive | Hard rule: never delete/overwrite a local file without first capturing it in a snapshot. Deletes propagate as tombstones only. |
 | D15 | Per-game control | `mode: sync | backup-only | off` per game. Default: `sync`; auto-downgraded to `backup-only` when Steam Cloud is detected. |
-| D16 | Apple Developer signing | Deferred — ship unsigned macOS builds initially. |
+| D16 | Apple Developer signing | ~~Deferred — ship unsigned~~ → **Superseded 2026-10-19: macOS builds are signed with a Developer ID Application certificate and notarized.** See [macOS signing & notarization](#macos-signing--notarization). |
 | D17 | Name | **"Yet another save game manager" (YASGM)** (decided 2026-07-17, replacing earlier *Bonfire* pick). Binary `yasgm`, OneDrive folder `Apps/YASGM/`, wrapper `yasgm run -- %command%`. Availability checked 2026-07-17: no crates.io crate, no GitHub project with the name — fully free. |
 | D18 | Offline mode | If the primary provider is unreachable, snapshots fall back to a **local pending store** (fixed path, not the D13 user-configurable one) instead of failing outright. Pending versions are **visible and restorable** (not just a silent queue) — merged into the normal version list with a `pending` flag — and auto-flush into the primary provider at the start of the next sync/backup run. |
+| D19 | Steam Deck Gaming Mode UI | **Decky Loader plugin is a v1.0 release blocker** (decided 2026-10-19; previously "v2, later"). Gaming Mode is where Deck users live — a desktop-mode-only GUI doesn't count as SteamOS support. |
+| D20 | Auto-update | **Required for v1.0** (2026-10-19). Desktop (Windows/macOS): **`tauri-plugin-updater`** — supersedes the earlier `self_update`-crate plan, since the shipped artifact is now the Tauri app with the CLI as a bundled sidecar (one update replaces both). SteamOS: **in-plugin self-update** from GitHub Releases, since the plugin is sideloaded (D21). See [Auto-update](#auto-update). |
+| D21 | SteamOS distribution | **Decided 2026-10-19: sideloaded, personal use — not submitted to the Decky store.** The Decky plugin zip is published on GitHub Releases and installed via Decky's developer-mode "Install from URL"/zip. It *bundles* a statically linked musl `yasgm` binary in `bin/` and runs the watch daemon as a child of the plugin backend. Updates: **in-plugin self-update** from GitHub Releases (Decky's store-based updater doesn't apply off-store). No Flatpak for v1.0. |
 
 ## Open questions
 
-- **Azure app registration** — create under the owner's Microsoft account
-  before Phase 1 OneDrive work (free, no subscription; produces the client ID
-  embedded in the app). Display name: **YASGM** (shows on consent screen and
-  names the OneDrive `Apps/YASGM/` folder).
+- **Updater signing key (D20)** — owner generates it (2026-10-19, see
+  [Updater signing key](#updater-signing-key)); public key then goes into
+  `tauri.conf.json`.
+- **macOS signing credentials (D16)** — owner obtains Developer ID
+  certificate + notarization API key.
+
 ## Research summary (2026-07-17)
 
 ### Existing tools and how they solved configuration
@@ -219,12 +224,135 @@ caveats into a supported feature.
 
 ## Auto-update
 
-- **SteamOS**: Flathub only — Flatpak handles updates; the app must *not*
-  self-update inside the sandbox.
-- **Windows** (and macOS later): GitHub Releases + the `self_update` crate;
-  check on start (opt-out), notify + one-click apply, verify release signatures
-  (minisign/ed25519), atomic binary swap. Also publish to winget/scoop
-  (and Homebrew later) for users who prefer package managers.
+Researched 2026-10-19 (D20, D21).
+
+### Desktop (Windows, macOS): `tauri-plugin-updater`
+
+- The release artifact is the Tauri app; the `yasgm` CLI ships inside it as
+  a sidecar, so one app update replaces both. This is why the earlier
+  `self_update`-crate plan is dropped — it would update a standalone CLI
+  binary that users no longer install separately.
+- **Feed**: a static `latest.json` attached to the newest GitHub Release
+  (`viktor-malieichyk/yasgm`), endpoint
+  `https://github.com/viktor-malieichyk/yasgm/releases/latest/download/latest.json`.
+  `tauri-apps/tauri-action` in GitHub Actions builds per-platform bundles,
+  signs the update artifacts, and generates `latest.json`. No server needed.
+- **Signatures are mandatory** (minisign/ed25519, public key in
+  `tauri.conf.json` → `plugins.updater.pubkey`). This is independent of OS
+  code signing: required alongside macOS Developer ID signing (D16) and
+  equally for unsigned Windows builds. Key custody: see Open questions.
+- **Artifacts**: macOS `.app.tar.gz` (+ `.sig`); Windows NSIS installer
+  (+ `.sig`), installed per-user so updates need no UAC prompt.
+- **UX**: check on start + every 24 h (opt-out in Settings), show "Update
+  available — vX.Y.Z" with release notes and an **Install & restart**
+  button; never install silently mid-sync. Must **stop and restart the
+  `watch --tray` daemon** around the swap (its autostart entry points at
+  the sidecar inside the app bundle, so the daemon binary is replaced too).
+- macOS builds are signed + notarized (D16 superseded), so in-place `.app`
+  replacement by the updater is the standard, supported Tauri path. Still
+  test an 0.x.y → 0.x.z update end-to-end before relying on it.
+- winget/scoop/Homebrew cask: optional later, they'd consume the same
+  release artifacts.
+
+### macOS signing & notarization
+
+Requirements (D16 superseded 2026-10-19):
+
+1. **Apple Developer Program** membership (paid, individual is fine).
+2. **Developer ID Application** certificate (not "Apple Development" or
+   "Mac App Distribution" — those don't work outside the App Store). Create
+   in Xcode → Settings → Accounts → Manage Certificates → + → Developer ID
+   Application (or via developer.apple.com with a CSR from Keychain
+   Access). Lands in the login keychain; identity string looks like
+   `Developer ID Application: Viktor Malieichyk (TEAMID)`. Export as
+   `.p12` only if CI will sign.
+3. **Notarization credentials** — preferred: an App Store Connect API key
+   (Users and Access → Integrations → Team Keys, role Developer): Issuer
+   ID, Key ID, and the `.p8` file (downloadable once). Alternative: Apple
+   ID + app-specific password + Team ID.
+4. **Tauri wiring**: `bundle.macOS.signingIdentity` set to the identity
+   (or `APPLE_SIGNING_IDENTITY` env); notarization env
+   `APPLE_API_ISSUER`, `APPLE_API_KEY`, `APPLE_API_KEY_PATH`. Tauri enables
+   the hardened runtime, signs the bundled `yasgm` sidecar too, notarizes,
+   and staples. CI additionally needs `APPLE_CERTIFICATE` (base64 `.p12`)
+   and `APPLE_CERTIFICATE_PASSWORD`.
+5. Side benefit: the autostart LaunchAgent (D11) shows the developer name in
+   macOS's "Background Items Added" notification instead of an unknown
+   binary.
+
+Windows stays unsigned (personal use; SmartScreen warning on first install
+only — the updater's own signature check is what protects updates).
+
+### Updater signing key
+
+Generated once by the owner (D20):
+
+```sh
+cd ui
+npx tauri signer generate -w ~/.tauri/yasgm-updater.key
+```
+
+Prompts for a password; writes `~/.tauri/yasgm-updater.key` (private) and
+`~/.tauri/yasgm-updater.key.pub` (public). The public key's contents go
+into `tauri.conf.json` → `plugins.updater.pubkey` (committed). The private
+key + password go into a password manager (and, if CI builds releases,
+GitHub secrets `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`). Never commit
+the private key. Losing it = no further auto-updates for installed copies.
+
+### SteamOS: the Decky plugin store (how Decky updates work)
+
+From Decky Loader's source (`frontend/src/store.tsx`, `plugin-loader.tsx`,
+`backend/decky_loader/updater.py`, `browser.py`) and the plugin database
+repo, verified 2026-10-19:
+
+- **Publishing**: the store is `SteamDeckHomebrew/decky-plugin-database`,
+  where each plugin is a **git submodule pinned to a commit**. Releasing an
+  update = PR bumping the submodule (and `package.json` `version`). Store
+  CI builds the plugin zip from source (frontend via pnpm/rollup; custom
+  backends via `backend/Dockerfile` + `entrypoint.sh` on SteamDeckHomebrew's
+  `holo-toolchain-rust` image, outputs from `backend/out/` land in the
+  zip's `bin/`). Updates land on `testing.deckbrew.xyz` first, need a
+  third-party test report (custom-backend plugins must be tested on SteamOS
+  **Preview** unless all deps are statically linked — another reason for a
+  static musl build), then core-team approval promotes to the main store.
+  Turnaround is human-paced (days to weeks per release).
+- **Client side**: Decky fetches `GET <store>/versions` (name →
+  `[version, sha256, artifact]`) on load and every 6 h, compares against
+  each installed plugin's `package.json` version, and shows a toast + badge;
+  the user installs updates from Decky settings ("Update all" available).
+  Not silent; users can "freeze" a plugin to stop update prompts. The zip's
+  sha256 is verified against the store's hash before extraction.
+- **`remote_binary`** in `package.json` (`name`, `url`, `sha256hash`) lets a
+  plugin pull a prebuilt binary at install time; reviewers vet the URL's
+  legitimacy. We'd prefer building from source in the store's CI instead.
+- **Prior art**: `decky-ludusavi` (same author as `decky-cloud-save`) is a
+  thin front-end that runs `flatpak install --or-update` for the Ludusavi
+  Flatpak and shells out to it — two update channels (store + Flatpak).
+  `decky-cloud-save` downloads a pinned rclone in its backend Dockerfile.
+  We pick the bundle-the-binary approach (D21) to keep one channel.
+- **Constraint found**: the store's plugin-addition PR template requires
+  attesting that generative AI did not write most of the code. Moot: per
+  D21 the plugin is sideloaded for personal use and never submitted.
+
+### SteamOS: in-plugin self-update (sideloaded, D21)
+
+Since Decky only update-checks plugins against its store, the plugin
+updates itself:
+
+- Release CI attaches `yasgm-decky.zip` + `yasgm-decky.zip.sha256` (and a
+  minisign `.sig`, reusing the D20 updater key) to each GitHub Release.
+- The plugin backend checks
+  `api.github.com/repos/viktor-malieichyk/yasgm/releases/latest` on load
+  and every 6 h (matching Decky's own cadence); compares to its
+  `package.json` version; the QAM panel shows "Update to vX.Y.Z".
+- On confirm: stop the daemon, download zip, verify sha256 **and**
+  signature, extract to a temp dir next to
+  `~/homebrew/plugins/YASGM`, atomically swap directories, then reload the
+  plugin (restart `plugin_loader` service — needs root; Decky plugin
+  backends run with the `root` flag or call Decky's own reload — pick
+  whichever works on real Decky, verify on the VM). Keep the previous dir
+  as `YASGM.bak` for rollback.
+- Never self-update mid-sync; never auto-apply without a click.
 
 ## UI plan
 
@@ -242,14 +370,47 @@ Phased:
    UI labor; **egui** — quickest to build, utilitarian look; local web UI
    served by the daemon — works in Deck desktop browser, no extra window
    toolkit.
-4. **Decky plugin** (v2, later): Gaming Mode status/controls on Steam Deck.
+4. **Decky plugin — required for v1.0 (D19).** See [Decky plugin](#decky-plugin-steamos-gaming-mode).
+
+### Decky plugin (SteamOS Gaming Mode)
+
+- **Layout**: standard `decky-plugin-template` (React + `@decky/ui`
+  frontend, Python `main.py` backend provided by Decky), plus
+  `backend/` building `yasgm` for `x86_64-unknown-linux-musl` (static, no
+  glibc coupling to SteamOS versions) into `bin/yasgm`.
+- **Backend (`main.py`)**: starts `bin/yasgm watch` as a long-running child
+  in `_main`, stops it in `_unload`; all queries/actions shell out to
+  `bin/yasgm … --json` — **the same subprocess + JSON seam the Tauri GUI
+  already uses**, so no new API surface. Runs as the `deck` user (no `root`
+  flag); confirm `HOME`/XDG env inside Decky's sandbox resolves to
+  `/home/deck` (Decky exposes `DECKY_USER_HOME`).
+- **Quick Access panel UI**: status line (last sync, errors, pending/
+  offline count), Sync now, Pause; game list with mode (sync/backup/off);
+  per-game versions with Restore/Pin; Settings: provider, keep count.
+- **Sign-in in Gaming Mode**: OneDrive device-code flow rendered as a
+  **QR code** of `https://microsoft.com/devicelogin` + the user code, so
+  the user signs in on a phone. `yasgm auth --device` needs a `--json`
+  progress mode (code, URL, expiry) for the plugin to render it.
+- **Better game start/stop detection on Deck**: the frontend can subscribe
+  to Steam's own app-lifetime notifications
+  (`SteamClient.GameSessions.RegisterForAppLifetimeNotifications`) and
+  forward start/exit to the daemon — authoritative, replacing the
+  unreliable `registry.vdf` `RunningAppID` polling on this platform. Needs
+  a small control channel into `watch` (e.g. a local socket or a command
+  file) — the first real reason to add IPC to the daemon.
+- **Toasts**: "Saves synced", "Conflict — both versions kept" (D5),
+  "Cloud newer — restored before launch".
+- **Single-daemon guard (new requirement, all platforms)**: a lockfile in
+  the data dir so the Decky-spawned daemon, an autostart `watch --tray`,
+  and a future Flatpak can never run two watchers over the same saves.
 
 ## Rust stack
 
 `tokio`, `reqwest` (Graph), `oauth2` (PKCE + device code), `serde_yaml`
 (manifest), `keyvalues-parser` + binary-VDF parsing (`appinfo.vdf`), `notify`,
-`sysinfo`, `rusqlite`, `zip`, `self_update`, `tray-icon`. GUI: Tauri v2 or
-iced (open question).
+`sysinfo`, `zip`, `tray-icon`. GUI: Tauri v2 + `tauri-plugin-updater`
+(D20). Decky plugin: TypeScript/React (`@decky/ui`, `@decky/api`) +
+Python `main.py`.
 
 ## Phases & estimates (~10–12 weeks total)
 
@@ -396,7 +557,8 @@ iced (open question).
     part previously resting on code review alone.
   Remaining in Phase 2 (needs SteamOS/Linux hardware to validate): running
   the above against a real Proton prefix end-to-end, cross-OS
-  normalization, Flatpak packaging.
+  normalization. (Flatpak packaging moved to post-1.0 — SteamOS ships via
+  the Decky plugin, D21.)
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
   macOS; Linux paths written but unvalidated per 2026-07-20 direction).
   - **Launch-wrapper mode: DONE 2026-07-20.** `yasgm run [--app <id>] --
@@ -863,8 +1025,101 @@ iced (open question).
     one launch, immediately clicking "Show" or just waiting resolved it
     every other time) — not reproduced across a clean 8-second polling
     run, treated as automation timing noise rather than a product bug.
-  Remaining in Phase 4: self-update, additional cloud providers beyond
-  OneDrive/LocalFolder.
+  Remaining in Phase 4: auto-update (moved into the v1.0 release plan
+  below); additional cloud providers beyond OneDrive/LocalFolder (post-1.0).
+- **Phase 5 — Decky plugin (~2–3 wks)**: NEW 2026-10-19 (D19). Blocked on
+  Linux/SteamOS hardware for real validation, but scaffolding, the musl
+  build, the `--json` additions to the CLI, and the frontend can be built
+  and unit-tested on the dev machine first.
+
+## Release plan (v1.0) — reviewed 2026-10-19
+
+v1.0 ships when all of these are done, in this order (updated 2026-10-19:
+things testable without SteamOS hardware or Apple credentials first;
+**macOS signing deliberately last**, so day-to-day builds stay unsigned
+and fast until the release is otherwise ready). Status is tracked inline.
+
+1. **Single-daemon lockfile** (needed by desktop autostart, the GUI's
+   tray, and Decky) — so two `watch` processes can never run over the
+   same saves. **DONE 2026-10-19.** `src/lock.rs`: OS advisory lock
+   (`std::fs::File::try_lock` — flock on Unix, LockFileEx on Windows; no
+   new crate) on `<data dir>/yasgm/watch.lock`, taken at the top of
+   `watch_cmd` for both headless and `--tray` modes and held for the
+   process lifetime. A second `watch` exits with code 3 and "already
+   running (pid N)". PID lives in a separate `watch.pid` sidecar because a
+   Windows lock also blocks reads of the locked file; it's informational
+   only — the OS drops the lock when the holder dies, so a stale pid file
+   never blocks (unit-tested). New `yasgm watch status [--json]` →
+   `{"running", "pid"}` for the GUI updater (step 2) and Decky (step 4).
+   Verified live on macOS: second headless and second `--tray` instance
+   both refused with the right pid; after `kill -9` of the daemon (which
+   landed mid initial sync) status reported not running, the stale pid
+   file was ignored, and `state.json` was still valid. Windows locking
+   path compiles from std but is unverified on hardware. Test gotcha: the
+   "lock frees after drop" unit test was flaky (~1 in 3) because other
+   tests spawn processes in parallel — a child forked while the fd is open
+   shares the flock until its exec closes it (O_CLOEXEC) — so the test
+   retries for up to 1 s. **Not covered**: a one-shot `sync`/`restore`
+   from the CLI or GUI can still run concurrently with the daemon's own
+   sync; a per-operation lock is a candidate follow-up.
+2. **Desktop auto-update (D20)**: `tauri-plugin-updater` + Settings toggle
+   + update banner + daemon stop/restart around install. Code can land
+   before the key exists; enabling it needs the owner's public key.
+3. **CLI groundwork for Decky**: `--json` for `status`, `auth --device`
+   (code/URL/expiry events), `games`; daemon control channel for external
+   start/stop events; static `x86_64-` and `aarch64-unknown-linux-musl`
+   builds.
+4. **Decky plugin (D19, D21)**: scaffold from `decky-plugin-template`,
+   bundled `bin/yasgm` per arch, QAM UI, QR device-code sign-in,
+   lifetime-notification forwarding, toasts.
+5. **Decky self-update** (D21): release zip + sha256 + signature, in-plugin
+   update check/apply/rollback.
+6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see
+   [Test environment](#test-environment-steamac-vm)), then real Deck
+   hardware for what the VM can't cover (carry-over from Phase 2):
+   Proton prefix end-to-end, Windows↔Deck cross-restore, Gaming Mode
+   sign-in, sleep/resume mid-sync, self-update/rollback.
+7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
+   `tauri-action` with updater signatures + `latest.json`, Decky zips per
+   arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`
+   crate, `tauri.conf.json`, Decky `package.json`).
+8. Docs: README install/update instructions per platform, PCGamingWiki
+   attribution (D10), privacy note (data only in the user's own cloud).
+9. **macOS signing + notarization (D16)** — last: add Developer ID
+   identity + notarization API key to the build, verify Gatekeeper accepts
+   the downloaded `.dmg` and that a signed→signed auto-update works.
+
+Explicitly **post-1.0**: Flathub desktop GUI on SteamOS, Linux desktop
+tray, extra cloud providers, GOG/Epic libraries (D3), Windows code signing,
+package-manager listings, Decky store submission (not planned, D21).
+
+### Test environment: steamac VM
+
+`fxgl/steamac` (installed on the dev Mac) runs Valve's official **ARM64
+SteamOS** (the Steam Frame image, `VARIANT_ID=steamdeck`) in a libkrun VM on
+Apple Silicon, with Gaming Mode, Desktop Mode, Steam, and Proton 11 ARM64 +
+FEX for x86 games. SSH: `ssh -p 2222 steamos@127.0.0.1` (dev launcher;
+enable in Settings → Advanced in the `.app`). Decky Loader's installer
+supports it (`uname -m` → `PluginLoader-arm64` asset, user detected via
+`SUDO_USER`).
+
+Good for: installing Decky + sideloading our plugin, the QAM UI in real
+Gaming Mode, QR device-code sign-in, daemon lifecycle under
+`plugin_loader`, self-update/rollback, Steam app-lifetime notifications,
+real Proton `compatdata/<appid>/pfx/drive_c/users/steamuser` save paths,
+cross-restore Mac/Windows ↔ SteamOS, sleep/resume of the VM.
+
+Differences from a real Deck — so the VM does not replace one final
+on-device check:
+- **aarch64, not x86_64** → CI must also build
+  `aarch64-unknown-linux-musl` (cheap with musl; the plugin picks the
+  binary by `uname -m`). The x86_64 build itself is only exercised on a
+  real Deck.
+- User is **`steamos`**, home `/home/steamos` — not `deck`. Useful: catches
+  any hard-coded `/home/deck`.
+- No SD-card library, no real Deck controller/suspend hardware, Frame-image
+  service masks.
+
 
 ## Risks
 
@@ -877,6 +1132,10 @@ iced (open question).
   wrapper.
 - Graph API throttling. Mitigation: one zip per snapshot, ETag caching,
   backoff.
+- **Decky store acceptance** (AI-authorship attestation, human review
+  latency). Mitigation: off-store zip + in-plugin self-update fallback.
+- **Updater key loss** bricks auto-update for all existing installs.
+  Mitigation: secrets + offline backup before the first public release.
 - PCGW licensing if ever commercialized (currently fine: MIT tool, runtime
   data fetch, attribution).
 
@@ -926,3 +1185,9 @@ Scope gotcha (verified): `Files.ReadWrite.AppFolder` cannot read `/me/drive`
 - https://learn.microsoft.com/en-us/graph/onedrive-sharepoint-appfolder
 - https://learn.microsoft.com/en-us/onedrive/developer/rest-api/concepts/special-folders-appfolder?view=odsp-graph-online
 - https://steamcommunity.com/discussions/forum/1/1621726179573666840/
+- https://github.com/SteamDeckHomebrew/decky-loader (store.tsx, plugin-loader.tsx, updater.py, browser.py)
+- https://github.com/SteamDeckHomebrew/decky-plugin-database (submodule model, PR templates)
+- https://github.com/SteamDeckHomebrew/decky-plugin-template
+- https://github.com/SteamDeckHomebrew/wiki/blob/main/plugin-dev/review-and-testing.md
+- https://github.com/GedasFX/decky-ludusavi, https://github.com/GedasFX/decky-cloud-save
+- https://v2.tauri.app/plugin/updater/
