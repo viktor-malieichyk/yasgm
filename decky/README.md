@@ -11,6 +11,6 @@ in the Quick Access menu:
 
 Steam's own game start/stop notifications are forwarded to the daemon, so
 saves are synced right after you quit a game. Daemon log:
-`~/homebrew/logs/YASGM/daemon.log`.
+`~/homebrew/logs/yasgm/daemon.log`.
 
 Build: `scripts/package-decky.sh` in the YASGM repo → `dist/yasgm-decky-<version>.zip`.

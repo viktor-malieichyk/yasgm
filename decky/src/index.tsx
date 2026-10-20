@@ -308,19 +308,30 @@ function Content() {
         )}
       </PanelSection>
 
-      {status && (needsSignIn || signingIn) && (
+      {status?.provider.type === "onedrive" && (
         <PanelSection title="OneDrive sign-in">
           {signingIn ? (
-            <SignIn
-              onDone={() => {
-                setSigningIn(false);
-                refresh();
-              }}
-            />
+            <>
+              <SignIn
+                onDone={() => {
+                  setSigningIn(false);
+                  refresh();
+                }}
+              />
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => setSigningIn(false)}>
+                  Cancel
+                </ButtonItem>
+              </PanelSectionRow>
+            </>
           ) : (
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => setSigningIn(true)}>
-                Sign in with a phone
+              <ButtonItem
+                layout="below"
+                description={needsSignIn ? undefined : "Already signed in — use this to switch account"}
+                onClick={() => setSigningIn(true)}
+              >
+                {needsSignIn ? "Sign in with a phone" : "Sign in again…"}
               </ButtonItem>
             </PanelSectionRow>
           )}
@@ -330,7 +341,20 @@ function Content() {
       {status?.provider.type === "local" && (
         <PanelSection title="Cloud">
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => act(useOnedrive, "Now using OneDrive")}>
+            <ButtonItem
+              layout="below"
+              disabled={busy}
+              onClick={() =>
+                showModal(
+                  <ConfirmModal
+                    strTitle="Switch to OneDrive?"
+                    strDescription="Your saves will sync with your OneDrive instead of the folder. If this Deck is already signed in to OneDrive, it starts syncing right away; otherwise you'll get a QR code to sign in."
+                    strOKButtonText="Switch"
+                    onOK={() => act(useOnedrive, "Now using OneDrive")}
+                  />,
+                )
+              }
+            >
               Use OneDrive instead
             </ButtonItem>
           </PanelSectionRow>
