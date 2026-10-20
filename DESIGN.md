@@ -1387,6 +1387,17 @@ and fast until the release is otherwise ready). Status is tracked inline.
    unsigned (SmartScreen warning; Windows code signing is post-1.0);
    the updater `.sig` is made. CI (step 7) should build on a Windows runner
    instead.
+   **First Windows run found a bug (2026-10-20):** every game and every
+   version row appeared twice. Cause: the new registry lookup returns Steam's
+   folder as `c:/program files (x86)/steam`, while `libraryfolders.vdf` lists
+   the same library as `C:\\Program Files (x86)\\Steam`; `libraries()`
+   compared `PathBuf`s as text, so the root was added twice and
+   `installed_games` read each `appmanifest` twice. Fix: libraries are
+   compared by a normalized key (canonicalized; on Windows `\\?\` prefix
+   dropped, slashes unified, lowercased), and `installed_games` also keeps
+   one entry per appid. Unit-tested (the spellings, a library listed twice,
+   a vdf entry pointing back at the root). Lesson: new platform-specific
+   code isn't verified until it has run on that platform.
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`

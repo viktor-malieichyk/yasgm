@@ -59,8 +59,27 @@ fn windows_steam_path() -> Option<PathBuf> {
 }
 
 /// All Steam library directories (each containing a `steamapps` folder).
+/// A path spelling-independent key: on Windows the registry says
+/// `c:/program files (x86)/steam` while libraryfolders.vdf says
+/// `C:\\Program Files (x86)\\Steam` for the same folder.
+fn normalize_windows_path(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+fn library_key(path: &Path) -> String {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy();
+    if cfg!(windows) {
+        // canonicalize adds a `\\?\` prefix on Windows.
+        normalize_windows_path(text.trim_start_matches(r"\\?\"))
+    } else {
+        text.into_owned()
+    }
+}
+
 pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
     let mut libs = vec![root.to_path_buf()];
+    let mut seen = vec![library_key(root)];
     let lf = root.join("steamapps/libraryfolders.vdf");
     if let Ok(text) = fs::read_to_string(&lf) {
         let doc = vdf::parse(&text).context("parsing libraryfolders.vdf")?;
@@ -69,7 +88,9 @@ pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
                 if let Some(entry) = value.as_obj() {
                     if let Some(path) = vdf::get_str(entry, "path") {
                         let path = PathBuf::from(path);
-                        if path.join("steamapps").is_dir() && !libs.contains(&path) {
+                        let key = library_key(&path);
+                        if path.join("steamapps").is_dir() && !seen.contains(&key) {
+                            seen.push(key);
                             libs.push(path);
                         }
                     }
@@ -122,7 +143,7 @@ pub fn installed_games(libraries: &[PathBuf]) -> Result<Vec<InstalledGame>> {
             let Some(app_id) = vdf::get_str(state, "appid").and_then(|s| s.parse().ok()) else {
                 continue;
             };
-            if NON_GAME_APP_IDS.contains(&app_id) {
+            if NON_GAME_APP_IDS.contains(&app_id) || games.iter().any(|g: &InstalledGame| g.app_id == app_id) {
                 continue;
             }
             let install_dir = vdf::get_str(state, "installdir").unwrap_or_default().to_owned();
@@ -186,6 +207,37 @@ mod tests {
         );
         fs::write(steamapps.join(format!("appmanifest_{app_id}.acf")), acf).unwrap();
         fs::create_dir_all(steamapps.join("common").join(install_dir)).unwrap();
+    }
+
+    #[test]
+    fn windows_path_spellings_of_one_folder_compare_equal() {
+        assert_eq!(
+            normalize_windows_path("c:/program files (x86)/steam"),
+            normalize_windows_path(r"C:\Program Files (x86)\Steam\")
+        );
+        assert_ne!(normalize_windows_path("D:/SteamLibrary"), normalize_windows_path("C:/SteamLibrary"));
+    }
+
+    #[test]
+    fn a_library_listed_twice_yields_each_game_once() {
+        let library = std::env::temp_dir().join(format!("yasgm-steam-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&library);
+        let steamapps = library.join("steamapps");
+        fs::create_dir_all(&steamapps).unwrap();
+        write_acf(&steamapps, 588650, "Dead Cells", "Dead Cells");
+        // The same folder spelled two ways, as on Windows.
+        let again = library.join("steamapps").join("..");
+        let games = installed_games(&[library.clone(), again.clone()]).unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(library_key(&library), library_key(&again));
+        // And libraryfolders.vdf pointing back at the root doesn't add it.
+        fs::write(
+            steamapps.join("libraryfolders.vdf"),
+            format!("\"libraryfolders\"\n{{\n \"0\"\n {{\n \"path\" \"{}\"\n }}\n}}\n", again.display()),
+        )
+        .unwrap();
+        assert_eq!(libraries(&library).unwrap().len(), 1);
+        fs::remove_dir_all(&library).unwrap();
     }
 
     #[test]
