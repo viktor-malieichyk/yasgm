@@ -1285,7 +1285,50 @@ and fast until the release is otherwise ready). Status is tracked inline.
      CI wiring is part of step 7.
 4. **Decky plugin (D19, D21)**: scaffold from `decky-plugin-template`,
    bundled `bin/yasgm` per arch, QAM UI, QR device-code sign-in,
-   lifetime-notification forwarding, toasts.
+   lifetime-notification forwarding, toasts. **CODE LANDED 2026-10-20;
+   backend verified on SteamOS, real Gaming Mode test pending** (Decky
+   Loader not yet installed in the VM — needs the owner's sudo).
+   - `decky/` (from the official template as of 2026-04: `@decky/ui` 4,
+     `@decky/api` 1, `@decky/rollup`; npm instead of pnpm). Zip via
+     `scripts/package-decky.sh` → `dist/yasgm-decky-<version>.zip` +
+     `.sha256`, layout `yasgm/{dist/index.js, main.py, plugin.json,
+     package.json, LICENSE, README.md, bin/yasgm-x86_64, bin/yasgm-aarch64}`
+     (4.4 MB). No `root` flag: runs as the Decky user, so it shares
+     config/state/lock with desktop-mode YASGM (`HOME` forced to
+     `DECKY_USER_HOME`, `LD_LIBRARY_PATH` dropped).
+   - Backend `main.py`: picks `bin/yasgm-<arch>` by `platform.machine()`
+     and restores its exec bit (zip extraction drops it — observed);
+     supervises `yasgm watch` as a child (log
+     `DECKY_PLUGIN_LOG_DIR/daemon.log`), restarting with backoff 5 s→5 min;
+     exit 3 (another daemon holds the lock, e.g. desktop autostart) →
+     uses that one and re-checks every 60 s. `_unload`: `watch send quit`,
+     then terminate/kill. Callables: `get_status` (status --json + watch
+     send status), `get_games`, `get_versions`, `sync_now`, `set_paused`,
+     `game_event` (→ `watch send game-started|game-stopped`), `restore`,
+     `set_pinned`, `set_mode`, `use_onedrive`, `start_sign_in` /
+     `cancel_sign_in` (streams `auth --device --json` lines to the
+     frontend as `yasgm_auth` events). Daemon ignores start/stop hints
+     for apps that aren't installed Steam games (non-Steam shortcuts).
+   - Frontend: QAM panel — status (provider/connection, daemon state,
+     pending games), Sync now, Pause toggle; OneDrive sign-in section
+     (QR of the verification URL via `qrcode-generator` + large user
+     code) when not signed in; "Use OneDrive instead" for the LocalFolder
+     provider; games list (mode · last synced) → route
+     `/yasgm/game/:appId` with mode dropdown, Sync this game, versions
+     with Restore (ConfirmModal; current saves kept as pinned first) and
+     Pin/Unpin, cross-OS note. `RegisterForAppLifetimeNotifications` →
+     `game_event`; after a stop it re-reads `games --json` at +20 s/+60 s
+     and toasts "Saves synced — <game>" if `synced_at` moved (no
+     continuous polling: `games --json` parses the 17 MB manifest).
+   - Verified on the steamac VM with the real zip and a stand-in `decky`
+     module (constants/logger/emit): every callable; pause/hints visible
+     in daemon status; unknown-app hint ignored; sign-in relay
+     (`not_needed` on LocalFolder); existing-daemon case (exit 3 → uses
+     it); plugin-owned daemon start, `kill -9` → restarted in 5 s, clean
+     unload with socket removed.
+   - Not done yet: conflict toast (D5), per-game keep setting,
+     "pull newer saves before launch" (decky-cloud-save pauses the game
+     with SIGSTOP meanwhile — candidate).
 5. **Decky self-update** (D21): release zip + sha256 + signature, in-plugin
    update check/apply/rollback.
 6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see

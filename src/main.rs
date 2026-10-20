@@ -1366,6 +1366,10 @@ fn watch_loop(
                         None => dirty.clear(),
                     }
                 }
+                // Steam reports non-Steam shortcuts and tools too; only
+                // installed Steam games matter.
+                WatchCommand::GameStarted(app_id) | WatchCommand::GameStopped(app_id)
+                    if !ctx.games.iter().any(|g| g.app_id == app_id) => {}
                 WatchCommand::GameStarted(app_id) => {
                     println!("Steam reports app {app_id} started");
                     exits.extend(session.hint_started(app_id));

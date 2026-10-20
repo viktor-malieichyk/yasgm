@@ -1,0 +1,11 @@
+{
+  "name": "YASGM",
+  "author": "Viktor Malieichyk",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["saves", "backup", "sync"],
+    "description": "Sync and back up game saves to your own OneDrive (or a folder), across Steam Deck, Windows and macOS.",
+    "image": ""
+  }
+}
