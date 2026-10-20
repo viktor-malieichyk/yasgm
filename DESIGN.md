@@ -1375,6 +1375,18 @@ and fast until the release is otherwise ready). Status is tracked inline.
    hardware for what the VM can't cover (carry-over from Phase 2):
    Proton prefix end-to-end, Windows↔Deck cross-restore, Gaming Mode
    sign-in, sleep/resume mid-sync, self-update/rollback.
+   **Windows installer, cross-built from the dev Mac (2026-10-20):**
+   `scripts/build-windows.sh` → `dist/YASGM_<ver>_x64-setup.exe` (+ `.sig`,
+   5.2 MB) with `cargo-xwin` (Windows SDK/CRT fetched on first use),
+   Homebrew `nsis` + `llvm`, and the signing env. `ui/scripts/build-sidecar.sh`
+   now builds the sidecar for Tauri's target (`TAURI_ENV_TARGET_TRIPLE`),
+   so the bundle carries `yasgm-x86_64-pc-windows-msvc.exe`. First time the
+   Windows-only code (registry Steam path, `taskkill`, daemon lock,
+   autostart) compiled; not run on Windows yet. Tauri flags cross-builds as
+   experimental and skips Authenticode signing, so the installer is
+   unsigned (SmartScreen warning; Windows code signing is post-1.0);
+   the updater `.sig` is made. CI (step 7) should build on a Windows runner
+   instead.
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`
