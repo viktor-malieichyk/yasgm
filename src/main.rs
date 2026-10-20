@@ -4,6 +4,7 @@
 
 mod autostart;
 mod config;
+mod control;
 mod fsutil;
 mod icons;
 mod local;
@@ -455,14 +456,24 @@ fn manifest_gaps_cmd(args: &[String]) -> Result<()> {
 
 fn auth(args: &[String]) -> Result<()> {
     if let config::ProviderConfig::Local { path } = config::Config::load().provider {
-        println!(
-            "cloud provider is a local folder ({}); no sign-in needed.",
-            path.display()
-        );
+        if flag(args, "--json") {
+            println!("{}", serde_json::json!({"event": "not_needed", "detail": format!("cloud provider is a local folder ({})", path.display())}));
+        } else {
+            println!("cloud provider is a local folder ({}); no sign-in needed.", path.display());
+        }
         return Ok(());
     }
+    if flag(args, "--device") && flag(args, "--json") {
+        return auth_device_json();
+    }
     let tokens = if flag(args, "--device") {
-        onedrive::login_device()?
+        onedrive::login_device(&|event| match event {
+            onedrive::DeviceEvent::Code { message: Some(message), .. } => println!("{message}"),
+            onedrive::DeviceEvent::Code { user_code, verification_uri, .. } => {
+                println!("Visit {verification_uri} on any device and enter the code {user_code}")
+            }
+            onedrive::DeviceEvent::Waiting { elapsed } => eprintln!("  still waiting for sign-in… ({elapsed}s elapsed)"),
+        })?
     } else {
         onedrive::login_interactive()?
     };
@@ -471,7 +482,50 @@ fn auth(args: &[String]) -> Result<()> {
     verify_cloud(&tokens.access_token)
 }
 
+/// `auth --device --json`: one JSON object per line, for a UI (the Decky
+/// plugin shows the code and a QR of the URL): `{"event":"code",
+/// "user_code","verification_uri","expires_in"}`, then `{"event":"waiting",
+/// "elapsed"}` every 30 s, then `{"event":"signed_in","detail"}` or
+/// `{"event":"error","message"}` (exit status 1).
+fn auth_device_json() -> Result<()> {
+    let emit = |value: serde_json::Value| {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{value}");
+        let _ = out.flush();
+    };
+    let result = onedrive::login_device(&|event| match event {
+        onedrive::DeviceEvent::Code { user_code, verification_uri, expires_in, .. } => emit(serde_json::json!({
+            "event": "code",
+            "user_code": user_code,
+            "verification_uri": verification_uri,
+            "expires_in": expires_in,
+        })),
+        onedrive::DeviceEvent::Waiting { elapsed } => emit(serde_json::json!({"event": "waiting", "elapsed": elapsed})),
+    })
+    .and_then(|tokens| {
+        onedrive::save_tokens(&tokens)?;
+        cloud_summary(&tokens.access_token)
+    });
+    match result {
+        Ok(detail) => {
+            emit(serde_json::json!({"event": "signed_in", "detail": detail}));
+            Ok(())
+        }
+        Err(err) => {
+            emit(serde_json::json!({"event": "error", "message": format!("{err:#}")}));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn verify_cloud(access_token: &str) -> Result<()> {
+    println!("{}", cloud_summary(access_token)?);
+    Ok(())
+}
+
+/// One line describing the OneDrive app folder, proving the token works.
+fn cloud_summary(access_token: &str) -> Result<String> {
     // Note: the AppFolder scope cannot read /me/drive (drive-wide metadata is
     // out of bounds — by design). The app folder itself is all we may touch;
     // the first request auto-creates it (Apps/YASGM).
@@ -486,16 +540,46 @@ fn verify_cloud(access_token: &str) -> Result<()> {
         .unwrap_or("");
     let owner = approot["createdBy"]["user"]["displayName"].as_str().unwrap_or("?");
     let size = approot["size"].as_u64().unwrap_or(0);
-    println!("App folder ready: {parent}/{name} (owner: {owner}, current size: {})", human_bytes(size));
+    Ok(format!("App folder ready: {parent}/{name} (owner: {owner}, current size: {})", human_bytes(size)))
+}
+
+/// `status [--json]`: is the configured provider reachable and writable,
+/// and is the watch daemon running. With `--json` a failed check is
+/// reported in the output (`"ok": false, "error"`) rather than as an error.
+fn status(args: &[String]) -> Result<()> {
+    let cfg = config::Config::load();
+    if !flag(args, "--json") {
+        println!("{}", check_provider(&cfg.provider)?);
+        return Ok(());
+    }
+    let check = check_provider(&cfg.provider);
+    let daemon = lock::daemon_status()?;
+    let (provider, signed_in) = match &cfg.provider {
+        config::ProviderConfig::Onedrive => {
+            (serde_json::json!({"type": "onedrive"}), serde_json::json!(onedrive::load_tokens().is_some()))
+        }
+        config::ProviderConfig::Local { path } => {
+            (serde_json::json!({"type": "local", "path": path}), serde_json::Value::Null)
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "provider": provider,
+            "signed_in": signed_in,
+            "ok": check.is_ok(),
+            "detail": check.as_ref().ok(),
+            "error": check.as_ref().err().map(|err| format!("{err:#}")),
+            "daemon": {"running": daemon.is_some(), "pid": daemon.flatten()},
+        })
+    );
     Ok(())
 }
 
-fn status() -> Result<()> {
-    match config::Config::load().provider {
-        config::ProviderConfig::Onedrive => {
-            let access_token = onedrive::ensure_access_token()?;
-            verify_cloud(&access_token)
-        }
+/// `Ok(summary)` if the configured provider is reachable and writable.
+fn check_provider(provider: &config::ProviderConfig) -> Result<String> {
+    match provider {
+        config::ProviderConfig::Onedrive => cloud_summary(&onedrive::ensure_access_token()?),
         config::ProviderConfig::Local { path } => {
             let meta = std::fs::metadata(&path)
                 .with_context(|| format!("{} not accessible", path.display()))?;
@@ -504,8 +588,7 @@ fn status() -> Result<()> {
             std::fs::write(&probe, b"ok")
                 .with_context(|| format!("{} is not writable", path.display()))?;
             let _ = std::fs::remove_file(&probe);
-            println!("Local folder provider ready: {}", path.display());
-            Ok(())
+            Ok(format!("Local folder provider ready: {}", path.display()))
         }
     }
 }
@@ -819,20 +902,61 @@ fn run_cmd(args: &[String]) -> Result<()> {
 /// runs a short setup step under Steam's launcher, exits it, and starts the
 /// real game seconds later (seen on SteamOS); without the grace the daemon
 /// synced mid-launch.
+///
+/// Steam's own start/stop notifications (forwarded by the Decky plugin over
+/// the control socket) take precedence: a hinted game counts as running
+/// until its stop hint, which exits it immediately; afterwards the detector
+/// seeing that game's processes wind down is ignored for a while.
 struct GameSession {
     active: Option<u64>,
     gone_since: Option<std::time::Instant>,
+    hinted: Option<u64>,
+    stopped: Option<(u64, std::time::Instant)>,
 }
 
 impl GameSession {
     const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+    /// How long after a stop hint the stopped game's lingering processes
+    /// (Proton teardown, the launcher) are ignored.
+    const STOP_QUIET: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn new(running: Option<u64>) -> GameSession {
-        GameSession { active: running, gone_since: None }
+        GameSession { active: running, gone_since: None, hinted: None, stopped: None }
+    }
+
+    /// Steam says `app_id` started. Returns a different game that was
+    /// running before, which is therefore done.
+    fn hint_started(&mut self, app_id: u64) -> Option<u64> {
+        let previous = self.active.filter(|a| *a != app_id);
+        self.hinted = Some(app_id);
+        self.active = Some(app_id);
+        self.gone_since = None;
+        self.stopped = None;
+        previous
+    }
+
+    /// Steam says `app_id` stopped: it exits now, if it was the running game.
+    fn hint_stopped(&mut self, app_id: u64, now: std::time::Instant) -> Option<u64> {
+        self.stopped = Some((app_id, now));
+        if self.hinted == Some(app_id) {
+            self.hinted = None;
+        }
+        if self.active != Some(app_id) {
+            return None;
+        }
+        self.active = None;
+        self.gone_since = None;
+        Some(app_id)
     }
 
     /// Feeds one detector poll (`seen`); returns the game that just exited.
     fn update(&mut self, seen: Option<u64>, now: std::time::Instant) -> Option<u64> {
+        if let Some(hinted) = self.hinted {
+            self.active = Some(hinted);
+            return None;
+        }
+        let quiet = self.stopped.is_some_and(|(id, at)| seen == Some(id) && now.duration_since(at) < Self::STOP_QUIET);
+        let seen = if quiet { None } else { seen };
         let exited = match self.active {
             Some(game) if seen == Some(game) => {
                 self.gone_since = None;
@@ -940,11 +1064,47 @@ fn register_watches(
     }
 }
 
-/// Control messages from the tray (or any future UI) into the watch loop.
-enum WatchCommand {
-    SyncNow,
+/// Control messages into the watch loop, from the tray menu or the control
+/// socket (`control.rs`, e.g. the Decky plugin).
+pub enum WatchCommand {
+    /// Sync one game, or all.
+    Sync(Option<u64>),
     TogglePause,
+    SetPaused(bool),
+    /// Steam reported a game start / stop (see `GameSession` hints).
+    GameStarted(u64),
+    GameStopped(u64),
+    /// Reply with the daemon's state as one JSON line.
+    Status(std::sync::mpsc::Sender<String>),
     Quit,
+}
+
+/// Answers one control-socket request by forwarding it to the watch loop.
+fn remote_command(tx: &std::sync::mpsc::Sender<WatchCommand>, request: control::Request) -> String {
+    use control::Request;
+    let command = match request {
+        Request::GameStarted(id) => WatchCommand::GameStarted(id),
+        Request::GameStopped(id) => WatchCommand::GameStopped(id),
+        Request::Sync(target) => WatchCommand::Sync(target),
+        Request::Pause => WatchCommand::SetPaused(true),
+        Request::Resume => WatchCommand::SetPaused(false),
+        Request::Quit => WatchCommand::Quit,
+        Request::Status => {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            if tx.send(WatchCommand::Status(reply_tx)).is_err() {
+                return "error: watch loop has stopped".into();
+            }
+            // The loop checks commands at least every 2 s, but a sync in
+            // progress holds it up.
+            return reply_rx
+                .recv_timeout(std::time::Duration::from_secs(8))
+                .unwrap_or_else(|_| "error: daemon is busy (syncing); try again".into());
+        }
+    };
+    match tx.send(command) {
+        Ok(()) => "ok".into(),
+        Err(_) => "error: watch loop has stopped".into(),
+    }
 }
 
 /// Daemon entry: headless by default, `--tray` adds a status icon with
@@ -956,6 +1116,16 @@ fn watch_cmd(args: &[String]) -> Result<()> {
     match positionals(args).first().map(String::as_str) {
         Some("stop") => return watch_stop(args),
         Some("start") => return watch_start(args),
+        Some("send") => {
+            let request = positionals(args)[1..].join(" ");
+            control::parse(&request).context(control::USAGE)?;
+            let reply = control::send(&request)?;
+            println!("{reply}");
+            if reply.starts_with("error") {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
         _ => {}
     }
     if positionals(args).first().map(String::as_str) == Some("status") {
@@ -993,17 +1163,21 @@ fn watch_cmd(args: &[String]) -> Result<()> {
         #[cfg(not(any(windows, target_os = "macos")))]
         eprintln!("tray is not supported on this OS yet; running headless watch");
     }
-    watch_loop(settle, None, None)
+    let (control_tx, control_rx) = std::sync::mpsc::channel();
+    watch_loop(settle, (control_tx, control_rx), None)
 }
 
-/// Terminates the running daemon (if any) and waits for its lock to free.
-/// The daemon has no graceful-shutdown channel yet (planned with the Decky
-/// control channel), so this is a plain terminate; that's safe because
-/// every local state write is atomic (fsutil) and cloud versions are
-/// written before their index entry.
+/// Stops the running daemon (if any) and waits for its lock to free: a
+/// clean `quit` over the control socket first (it finishes a sync in
+/// progress), then terminate. Terminating is safe too — every local state
+/// write is atomic (fsutil) and cloud versions are written before their
+/// index entry — just not as polite.
 fn watch_stop(args: &[String]) -> Result<()> {
     let was_running = lock::daemon_status()?;
-    if let Some(pid) = was_running {
+    let quit_cleanly = was_running.is_some()
+        && control::send("quit").is_ok_and(|reply| reply == "ok")
+        && lock::wait_until_stopped(std::time::Duration::from_secs(30))?;
+    if let (Some(pid), false) = (was_running, quit_cleanly) {
         let pid = pid.context("daemon is running but its pid is unknown (watch.pid missing)")?;
         terminate(pid, false);
         if !lock::wait_until_stopped(std::time::Duration::from_secs(10))? {
@@ -1085,7 +1259,7 @@ fn watch_start(args: &[String]) -> Result<()> {
 /// launches.
 fn watch_loop(
     settle: std::time::Duration,
-    control: Option<std::sync::mpsc::Receiver<WatchCommand>>,
+    (control_tx, control_rx): (std::sync::mpsc::Sender<WatchCommand>, std::sync::mpsc::Receiver<WatchCommand>),
     status: Option<std::sync::mpsc::Sender<String>>,
 ) -> Result<()> {
     use std::sync::mpsc;
@@ -1100,6 +1274,10 @@ fn watch_loop(
 
     let ctx = load_ctx()?;
     let cfg = config::Config::load();
+
+    if let Err(err) = control::serve(move |request| remote_command(&control_tx, request)) {
+        eprintln!("control socket unavailable (watch send won't reach this daemon): {err:#}");
+    }
 
     println!("initial sync pass…");
     report("initial sync…");
@@ -1156,37 +1334,66 @@ fn watch_loop(
             handle_event(event, &mut dirty, &roots);
         }
 
-        if let Some(control) = &control {
-            while let Ok(command) = control.try_recv() {
-                match command {
-                    WatchCommand::Quit => {
-                        report("stopped");
-                        return Ok(());
-                    }
-                    WatchCommand::TogglePause => {
-                        paused = !paused;
-                        println!("{}", if paused { "paused" } else { "resumed" });
-                        report(if paused { "paused" } else { "resumed — watching" });
-                    }
-                    WatchCommand::SyncNow => {
-                        report("syncing…");
-                        match run_sync(None, false) {
-                            Ok(()) => report("synced (manual)"),
-                            Err(err) => {
-                                eprintln!("manual sync failed: {err:#}");
-                                report("sync failed — see log");
-                            }
+        let mut exits: Vec<u64> = Vec::new();
+        while let Ok(command) = control_rx.try_recv() {
+            match command {
+                WatchCommand::Quit => {
+                    report("stopped");
+                    control::remove_socket();
+                    return Ok(());
+                }
+                WatchCommand::TogglePause | WatchCommand::SetPaused(_) => {
+                    paused = match command {
+                        WatchCommand::SetPaused(value) => value,
+                        _ => !paused,
+                    };
+                    println!("{}", if paused { "paused" } else { "resumed" });
+                    report(if paused { "paused" } else { "resumed — watching" });
+                }
+                WatchCommand::Sync(target) => {
+                    report("syncing…");
+                    match run_sync(target, false) {
+                        Ok(()) => report("synced (manual)"),
+                        Err(err) => {
+                            eprintln!("manual sync failed: {err:#}");
+                            report("sync failed — see log");
                         }
-                        dirty.clear();
                     }
+                    match target {
+                        Some(app_id) => {
+                            dirty.remove(&app_id);
+                        }
+                        None => dirty.clear(),
+                    }
+                }
+                WatchCommand::GameStarted(app_id) => {
+                    println!("Steam reports app {app_id} started");
+                    exits.extend(session.hint_started(app_id));
+                }
+                WatchCommand::GameStopped(app_id) => {
+                    println!("Steam reports app {app_id} stopped");
+                    exits.extend(session.hint_stopped(app_id, Instant::now()));
+                }
+                WatchCommand::Status(reply) => {
+                    let mut pending: Vec<u64> = dirty.keys().copied().collect();
+                    pending.sort();
+                    let _ = reply.send(
+                        serde_json::json!({
+                            "paused": paused,
+                            "running_game": session.active,
+                            "pending_sync": pending,
+                            "watching_games": n_games,
+                        })
+                        .to_string(),
+                    );
                 }
             }
         }
 
-        let exited = session.update(detector.poll(&ctx.root, &ctx.games), Instant::now());
+        exits.extend(session.update(detector.poll(&ctx.root, &ctx.games), Instant::now()));
         // Still "running" during the exit grace period, so settled saves wait too.
         let running_now = session.active;
-        if let Some(prev) = exited {
+        for prev in exits {
             if !paused {
                 println!("app {prev} exited — syncing");
                 report("game exited — syncing…");
@@ -1518,6 +1725,7 @@ fn config_cmd(args: &[String]) -> Result<()> {
         // List effective settings for installed games.
         let json = flag(args, "--json");
         let ctx = load_ctx()?;
+        let state = config::State::load();
         let mut json_out = Vec::new();
         for game in &ctx.games {
             let game_cfg = cfg.game(game.app_id);
@@ -1542,6 +1750,8 @@ fn config_cmd(args: &[String]) -> Result<()> {
                     "default_keep": store::DEFAULT_KEEP,
                     "in_manifest": ctx.merged_game(game.app_id).is_some(),
                     "cross_os_note": ctx.merged_game(game.app_id).and_then(|m| cross_os_note(&m.files, ctx.os)),
+                    "last_version": state.get(&ctx.account, game.app_id).map(|s| s.last_version.clone()),
+                    "synced_at": state.get(&ctx.account, game.app_id).map(|s| s.synced_at),
                 }));
                 continue;
             }
@@ -1819,6 +2029,27 @@ mod tests {
     }
 
     #[test]
+    fn steam_hints_override_detection() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut session = GameSession::new(None);
+        assert_eq!(session.hint_started(42), None);
+        // Detection missing the game doesn't end a hinted session.
+        assert_eq!(session.update(None, at(30)), None);
+        assert_eq!(session.active, Some(42));
+        // Stop hint exits at once, no grace period.
+        assert_eq!(session.hint_stopped(42, at(31)), Some(42));
+        assert_eq!(session.active, None);
+        // The launcher lingering while Proton shuts down isn't a new session.
+        assert_eq!(session.update(Some(42), at(33)), None);
+        assert_eq!(session.active, None);
+        assert_eq!(session.update(None, at(50)), None, "no second exit");
+        // A stop hint for a game that isn't running does nothing.
+        assert_eq!(session.hint_stopped(7, at(60)), None);
+    }
+
+    #[test]
     fn switching_games_exits_the_previous_one_immediately() {
         use std::time::Instant;
         let now = Instant::now();
@@ -1873,7 +2104,11 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         None | Some("doctor") => doctor(),
         Some("auth") => auth(&args),
-        Some("status") => status(),
+        Some("status") => status(&args),
+        Some("games") => {
+            ensure!(positionals(&args).is_empty(), "usage: yasgm games [--json]");
+            config_cmd(&args)
+        }
         Some("sync") => sync_cmd(&args),
         Some("run") => run_cmd(&args),
         Some("watch") => watch_cmd(&args),
@@ -1896,9 +2131,9 @@ fn main() -> Result<()> {
         Some(other) => {
             eprintln!(
                 "unknown command {other:?}\navailable:\n  \
-                 doctor\n  auth [--device]\n  status\n  \
+                 doctor\n  auth [--device [--json]]\n  status [--json]\n  games [--json]\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 watch [--settle <secs>] [--tray] | watch status|start|stop [--json]\n  autostart [on|off|status] [--json]\n  \
+                 watch [--settle <secs>] [--tray] | watch status|start|stop [--json] | watch send <request>\n  autostart [on|off|status] [--json]\n  \
                  provider [onedrive|local <path>|status] [--json]\n  \
                  paths <appid>\n  backup-location <appid>\n  \
                  pending-location <appid>\n  \

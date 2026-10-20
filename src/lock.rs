@@ -43,6 +43,11 @@ impl std::fmt::Display for AlreadyRunning {
 
 impl std::error::Error for AlreadyRunning {}
 
+/// Where the daemon's lock, pid file and control socket live.
+pub fn daemon_dir() -> Result<PathBuf> {
+    lock_dir()
+}
+
 fn lock_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .context("no data directory on this platform")?

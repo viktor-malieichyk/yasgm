@@ -1254,7 +1254,35 @@ and fast until the release is otherwise ready). Status is tracked inline.
 3. **CLI groundwork for Decky**: `--json` for `status`, `auth --device`
    (code/URL/expiry events), `games`; daemon control channel for external
    start/stop events; static `x86_64-` and `aarch64-unknown-linux-musl`
-   builds.
+   builds. **DONE 2026-10-20.**
+   - `status --json` → `{provider, signed_in, ok, detail, error, daemon:
+     {running, pid}}`; a failed provider check is reported in the JSON
+     (`ok: false`), not as a failure. `games [--json]` = the per-game
+     listing (`config --json`) plus `last_version`/`synced_at` from
+     state.json. `auth --device --json` → JSON lines: `code` {user_code,
+     verification_uri, expires_in}, `waiting` {elapsed} every 30 s, then
+     `signed_in` {detail} or `error` {message} (exit 1); `not_needed` for
+     the LocalFolder provider. `onedrive::login_device` now reports through
+     a `DeviceEvent` callback (text and JSON share it).
+   - Control channel (`src/control.rs`): Unix socket
+     `<data dir>/yasgm/watch.sock` (0600, next to `watch.lock`; stale file
+     replaced on start since we hold the lock; removed on quit). One line
+     per connection, one reply line (`ok` / JSON / `error: …`). Client:
+     `yasgm watch send game-started <id> | game-stopped <id> | sync [id] |
+     pause | resume | quit | status` (`status` → `{paused, running_game,
+     pending_sync, watching_games}`). Headless and tray modes share one
+     `WatchCommand` channel. Steam start/stop hints override process
+     detection in `GameSession`: a hinted game is running until its stop
+     hint, which syncs immediately (no grace), and its lingering processes
+     are ignored for 30 s after. `watch stop` now asks for `quit` first
+     (finishes a sync in progress; 30 s timeout) and only then terminates.
+     Not on Windows (no Decky there): `serve` is a no-op, `send` errors.
+     Verified in the steamac VM: every request, hint → one exit sync,
+     clean stop in 1.9 s with the socket removed.
+   - `scripts/build-linux.sh [x86_64|aarch64]` → `dist/yasgm-linux-<arch>`
+     (static, stripped; 4.9 MB / 4.3 MB) via `cargo zigbuild`, using
+     rustup's toolchain even when a Homebrew rustc comes first on PATH.
+     CI wiring is part of step 7.
 4. **Decky plugin (D19, D21)**: scaffold from `decky-plugin-template`,
    bundled `bin/yasgm` per arch, QAM UI, QR device-code sign-in,
    lifetime-notification forwarding, toasts.

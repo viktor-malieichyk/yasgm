@@ -39,9 +39,10 @@ fn icon() -> tray_icon::Icon {
 #[allow(unused_assignments, unused_variables)]
 pub fn tray_main(settle: Duration) -> Result<()> {
     let (control_tx, control_rx) = mpsc::channel::<WatchCommand>();
+    let control_tx_loop = control_tx.clone();
     let (status_tx, status_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
-        if let Err(err) = crate::watch_loop(settle, Some(control_rx), Some(status_tx)) {
+        if let Err(err) = crate::watch_loop(settle, (control_tx_loop, control_rx), Some(status_tx)) {
             eprintln!("watch loop ended with error: {err:#}");
         }
         // Watch loop gone (Quit or error): the event loop below exits via
@@ -93,7 +94,7 @@ pub fn tray_main(settle: Duration) -> Result<()> {
 
         while let Ok(menu_event) = menu_events.try_recv() {
             if menu_event.id == *sync_item.id() {
-                let _ = control_tx.send(WatchCommand::SyncNow);
+                let _ = control_tx.send(WatchCommand::Sync(None));
             } else if menu_event.id == *pause_item.id() {
                 paused = !paused;
                 pause_item.set_text(if paused { "Resume" } else { "Pause" });

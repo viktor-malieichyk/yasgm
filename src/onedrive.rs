@@ -247,32 +247,39 @@ struct DeviceCodeResponse {
 /// (e.g. switching to a phone to sign in) doesn't look hung.
 const PING_EVERY_SECS: u64 = 30;
 
+/// Progress of a device-code sign-in, for whoever shows it to the user.
+pub enum DeviceEvent<'a> {
+    /// Show this: open `verification_uri` on any device, enter `user_code`.
+    Code { user_code: &'a str, verification_uri: &'a str, expires_in: u64, message: Option<&'a str> },
+    /// Still waiting for the user (sent every 30 s).
+    Waiting { elapsed: u64 },
+}
+
 /// Device-code sign-in (Steam Deck Gaming Mode, SSH sessions, …).
-pub fn login_device() -> Result<Tokens> {
+pub fn login_device(on_event: &dyn Fn(DeviceEvent)) -> Result<Tokens> {
     let resp = ureq::post(DEVICE_CODE_URL)
         .send_form(&[("client_id", CLIENT_ID), ("scope", SCOPES)])
         .context("requesting device code")?;
     let dc: DeviceCodeResponse = serde_json::from_str(&resp.into_string()?)?;
-    match &dc.message {
-        Some(message) => println!("{message}"),
-        None => println!(
-            "Visit {} on any device and enter the code {}",
-            dc.verification_uri, dc.user_code
-        ),
-    }
 
     let mut interval = dc.interval.max(1);
     // Entra's default device-code lifetime is 900s; fall back to that if the
     // server omits expires_in, so a local guard still exists as a backstop
     // alongside the server's own expired_token error.
     let deadline = if dc.expires_in > 0 { dc.expires_in } else { 900 };
+    on_event(DeviceEvent::Code {
+        user_code: &dc.user_code,
+        verification_uri: &dc.verification_uri,
+        expires_in: deadline,
+        message: dc.message.as_deref(),
+    });
     let mut waited = 0u64;
     let mut last_ping = 0u64;
     loop {
         sleep(Duration::from_secs(interval));
         waited += interval;
         if waited - last_ping >= PING_EVERY_SECS {
-            eprintln!("  still waiting for sign-in… ({waited}s elapsed)");
+            on_event(DeviceEvent::Waiting { elapsed: waited });
             last_ping = waited;
         }
         match token_request(&[
