@@ -23,7 +23,7 @@ import qrcode from "qrcode-generator";
 
 /** `yasgm status --json`, plus the daemon's `watch send status` reply. */
 interface Status {
-  provider: { type: "onedrive" | "local"; path?: string };
+  provider: { type: "onedrive" | "local" | "none"; path?: string };
   signed_in: boolean | null;
   ok: boolean;
   detail: string | null;
@@ -88,7 +88,7 @@ const setKeep = callable<[appId: number, keep: number], string>("set_keep");
 const restoreVersion = callable<[appId: number, versionId: string], string>("restore");
 const setPinned = callable<[appId: number, versionId: string, pinned: boolean], string>("set_pinned");
 const setMode = callable<[appId: number, mode: string], string>("set_mode");
-const useOnedrive = callable<[], string>("use_onedrive");
+const disconnectCloud = callable<[], string>("disconnect");
 const startSignIn = callable<[], void>("start_sign_in");
 const cancelSignIn = callable<[], void>("cancel_sign_in");
 
@@ -253,7 +253,11 @@ function Content() {
   };
 
   const paused = status?.watch?.paused ?? false;
-  const needsSignIn = status?.provider.type === "onedrive" && (!status.signed_in || !status.ok);
+  // One provider at a time, and signing in is choosing it: no provider
+  // switch. Disconnected (or signed out of OneDrive) → QR sign-in; connected
+  // → Disconnect.
+  const needsSignIn = status?.provider.type === "none" || (status?.provider.type === "onedrive" && !status.signed_in);
+  const connected = !!status && !needsSignIn;
   const providerLabel = status?.provider.type === "local" ? `Folder: ${status.provider.path}` : "OneDrive";
 
   return (
@@ -274,7 +278,15 @@ function Content() {
             <PanelSectionRow>
               <Field
                 label={providerLabel}
-                description={status.ok ? "Connected" : status.error ?? "Not connected"}
+                description={
+                  status.provider.type === "none"
+                    ? "Not connected — your saves aren't being backed up"
+                    : needsSignIn
+                      ? "Signed out"
+                      : status.ok
+                        ? "Connected"
+                        : status.error ?? "Not working right now"
+                }
               />
             </PanelSectionRow>
             <PanelSectionRow>
@@ -308,8 +320,8 @@ function Content() {
         )}
       </PanelSection>
 
-      {status?.provider.type === "onedrive" && (
-        <PanelSection title="OneDrive sign-in">
+      {needsSignIn && (
+        <PanelSection title="Connect OneDrive">
           {signingIn ? (
             <>
               <SignIn
@@ -326,19 +338,15 @@ function Content() {
             </>
           ) : (
             <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                description={needsSignIn ? undefined : "Already signed in — use this to switch account"}
-                onClick={() => setSigningIn(true)}
-              >
-                {needsSignIn ? "Sign in with a phone" : "Sign in again…"}
+              <ButtonItem layout="below" onClick={() => setSigningIn(true)}>
+                Sign in with a phone
               </ButtonItem>
             </PanelSectionRow>
           )}
         </PanelSection>
       )}
 
-      {status?.provider.type === "local" && (
+      {connected && (
         <PanelSection title="Cloud">
           <PanelSectionRow>
             <ButtonItem
@@ -347,15 +355,19 @@ function Content() {
               onClick={() =>
                 showModal(
                   <ConfirmModal
-                    strTitle="Switch to OneDrive?"
-                    strDescription="Your saves will sync with your OneDrive instead of the folder. If this Deck is already signed in to OneDrive, it starts syncing right away; otherwise you'll get a QR code to sign in."
-                    strOKButtonText="Switch"
-                    onOK={() => act(useOnedrive, "Now using OneDrive")}
+                    strTitle="Disconnect?"
+                    strDescription={
+                      status?.provider.type === "local"
+                        ? "YASGM stops using this folder. Its contents are untouched."
+                        : "YASGM signs out of OneDrive on this Deck and stops syncing. Your saves in OneDrive are untouched."
+                    }
+                    strOKButtonText="Disconnect"
+                    onOK={() => act(disconnectCloud, "Disconnected")}
                   />,
                 )
               }
             >
-              Use OneDrive instead
+              Disconnect
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>

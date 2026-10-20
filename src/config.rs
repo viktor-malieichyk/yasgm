@@ -58,6 +58,10 @@ pub struct GameConfig {
 pub enum ProviderConfig {
     Onedrive,
     Local { path: PathBuf },
+    /// Disconnected on purpose (`yasgm provider disconnect`): nothing syncs
+    /// until a provider is connected again. Not the default — an existing
+    /// install without a provider setting still means OneDrive.
+    None,
 }
 
 impl Default for ProviderConfig {
@@ -148,5 +152,24 @@ impl State {
                     .as_secs(),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_round_trips_including_disconnected() {
+        for json in [r#"{"type":"onedrive"}"#, r#"{"type":"local","path":"/x"}"#, r#"{"type":"none"}"#] {
+            let provider: ProviderConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&provider).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn a_config_without_a_provider_still_means_onedrive() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(matches!(cfg.provider, ProviderConfig::Onedrive));
     }
 }

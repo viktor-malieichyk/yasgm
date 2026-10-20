@@ -1398,6 +1398,31 @@ and fast until the release is otherwise ready). Status is tracked inline.
    one entry per appid. Unit-tested (the spellings, a library listed twice,
    a vdf entry pointing back at the root). Lesson: new platform-specific
    code isn't verified until it has run on that platform.
+   **Disconnect + QR sign-in everywhere (2026-10-20).** Providers are
+   exclusive and connecting one *is* choosing it, so the "Use OneDrive /
+   Use folder" switch is gone. `ProviderConfig::None` ("disconnected", never
+   the default — an install with no provider setting still means OneDrive).
+   `yasgm provider disconnect [--json]`: OneDrive → deletes `tokens.json`,
+   folder → just forgets it (contents untouched); cloud data is never
+   touched, and the Microsoft-side grant stays until revoked at
+   account.live.com/consent/Manage (printed). With no provider the CLI
+   says "no cloud provider connected — sign in with `yasgm auth` or choose
+   a folder", `status` reports `ok:false`, and the daemon idles silently
+   (`EventLog::sync` skips; no error events). Signing in (`auth`, `--device`,
+   `--device --json`) sets the provider to OneDrive when it was none; `auth`
+   still refuses on a folder provider (disconnect first). QR codes:
+   CLI `auth --device` prints a terminal QR of the verification link
+   (`qrcode` crate, Unicode half-blocks — covers Linux desktop, which has no
+   GUI before post-1.0); desktop GUI Settings → "Cloud sync" card: connected
+   → provider + connection detail, Check connection, Disconnect (inline
+   confirm); disconnected → "Sign in with a phone (QR code)" (Tauri command
+   `start_device_sign_in` spawns `auth --device --json` and emits `auth-event`s;
+   page renders the QR with vendored `qrcode-generator` + the code),
+   "Sign in with a browser" (the old PKCE flow), or "A folder". The Decky
+   panel likewise: Disconnect (confirm) when connected, QR sign-in when not;
+   "Use OneDrive instead" and "Sign in again" removed (disconnect → sign in
+   switches account). Verified: CLI cycle, daemon idle while disconnected and
+   QR events on the VM, GUI states via headless Chrome with a stubbed backend.
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`

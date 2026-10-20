@@ -17,9 +17,10 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -225,9 +226,85 @@ async fn get_provider(app: AppHandle) -> Result<serde_json::Value, String> {
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
 }
 
+/// `yasgm status --json`: provider, whether signed in, whether the cloud is
+/// reachable (a real probe — can take a moment for OneDrive), daemon state.
 #[tauri::command]
-async fn set_provider_onedrive(app: AppHandle) -> Result<String, String> {
-    run_yasgm(&app, &["provider", "onedrive"]).await
+async fn get_cloud_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let stdout = run_yasgm(&app, &["status", "--json"]).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+/// Signs out of OneDrive on this device / stops using the folder. Saves in
+/// the cloud and the folder's contents are untouched.
+#[tauri::command]
+async fn disconnect_provider(app: AppHandle, sign_in: State<'_, DeviceSignIn>) -> Result<String, String> {
+    sign_in.cancel();
+    run_yasgm(&app, &["provider", "disconnect"]).await
+}
+
+/// The running `auth --device --json` child, if a QR sign-in is in progress.
+#[derive(Default)]
+struct DeviceSignIn(std::sync::Mutex<Option<CommandChild>>);
+
+impl DeviceSignIn {
+    fn cancel(&self) {
+        if let Some(child) = self.0.lock().unwrap().take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Starts the OneDrive device-code sign-in for a QR code. Each JSON line the
+/// CLI prints is emitted to the page as an `auth-event`: `code` (with the
+/// link and user code to show), `waiting`, then `signed_in` or `error`.
+#[tauri::command]
+fn start_device_sign_in(app: AppHandle, sign_in: State<'_, DeviceSignIn>) -> Result<(), String> {
+    sign_in.cancel();
+    let (mut events, child) = app
+        .shell()
+        .sidecar("yasgm")
+        .map_err(|err| format!("failed to prepare yasgm sidecar: {err}"))?
+        .args(["auth", "--device", "--json"])
+        .spawn()
+        .map_err(|err| format!("failed to run yasgm: {err}"))?;
+    let pid = child.pid();
+    *sign_in.0.lock().unwrap() = Some(child);
+
+    tauri::async_runtime::spawn(async move {
+        let mut buffer = String::new();
+        let mut finished = false;
+        while let Some(event) = events.recv().await {
+            match event {
+                CommandEvent::Stdout(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(end) = buffer.find('\n') {
+                        let line: String = buffer.drain(..=end).collect();
+                        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+                        finished |= matches!(value["event"].as_str(), Some("signed_in" | "error" | "not_needed"));
+                        let _ = app.emit("auth-event", value);
+                    }
+                }
+                CommandEvent::Terminated(_) | CommandEvent::Error(_) => {
+                    if !finished {
+                        let _ = app.emit("auth-event", serde_json::json!({"event": "error", "message": "sign-in stopped"}));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let state = app.state::<DeviceSignIn>();
+        let mut current = state.0.lock().unwrap();
+        if current.as_ref().is_some_and(|c| c.pid() == pid) {
+            *current = None;
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_device_sign_in(sign_in: State<'_, DeviceSignIn>) {
+    sign_in.cancel();
 }
 
 #[tauri::command]
@@ -247,13 +324,6 @@ async fn pick_local_folder(app: AppHandle) -> Option<String> {
         let _ = tx.send(folder);
     });
     rx.recv().ok().flatten().map(|f| f.to_string())
-}
-
-/// Runs the real connectivity check (Graph app-folder probe for OneDrive,
-/// directory read/write probe for LocalFolder).
-#[tauri::command]
-async fn cloud_status(app: AppHandle) -> Result<String, String> {
-    run_yasgm(&app, &["status"]).await
 }
 
 /// Interactive OneDrive sign-in: opens the system browser and blocks until
@@ -385,6 +455,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PendingUpdate::default())
+        .manage(DeviceSignIn::default())
         .invoke_handler(tauri::generate_handler![
             list_versions,
             game_icons,
@@ -395,10 +466,12 @@ pub fn run() {
             set_pinned,
             remove_version,
             get_provider,
-            set_provider_onedrive,
+            get_cloud_status,
+            disconnect_provider,
+            start_device_sign_in,
+            cancel_device_sign_in,
             set_provider_local,
             pick_local_folder,
-            cloud_status,
             cloud_auth,
             get_autostart,
             set_autostart,

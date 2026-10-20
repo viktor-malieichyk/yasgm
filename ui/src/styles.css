@@ -730,6 +730,58 @@ img.game-icon {
   color: var(--accent-text);
 }
 
+.cloud-title {
+  font-weight: 650;
+  font-size: 15px;
+}
+
+button.danger {
+  color: #c0392b;
+}
+
+button.danger:hover:not(:disabled) {
+  color: #ffffff;
+  background: #c0392b;
+}
+
+:root[data-theme="dark"] button.danger,
+:root[data-theme="steam"] button.danger {
+  color: #ff8a80;
+}
+
+.qr-panel {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-top: 6px;
+}
+
+.qr-panel img {
+  width: 176px;
+  height: 176px;
+  image-rendering: pixelated;
+  background: #ffffff;
+  border-radius: var(--control-radius);
+  padding: 6px;
+}
+
+.qr-panel img:not([src]) {
+  visibility: hidden;
+}
+
+.qr-text p {
+  margin: 0 0 4px;
+}
+
+.qr-user-code {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  margin-bottom: 8px;
+  user-select: all;
+}
+
 .provider-option {
   border: 1px solid var(--border);
   border-radius: var(--control-radius);

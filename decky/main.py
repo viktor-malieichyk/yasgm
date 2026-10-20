@@ -263,8 +263,10 @@ class Plugin:
             raise ValueError(f"unknown mode {mode}")
         return (await run("config", str(app_id), "--mode", mode)).strip()
 
-    async def use_onedrive(self) -> str:
-        return (await run("provider", "onedrive")).strip()
+    async def disconnect(self) -> str:
+        """Signs out of OneDrive on this Deck (or stops using the folder)."""
+        await self.cancel_sign_in()
+        return (await run("provider", "disconnect")).strip()
 
     # ---- OneDrive sign-in (device code) ------------------------------------
 

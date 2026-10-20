@@ -5,6 +5,7 @@
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>YASGM</title>
+    <script src="vendor/qrcode.js"></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -107,33 +108,55 @@
           </section>
 
           <section class="card">
-            <h3>Cloud provider</h3>
-            <p id="provider-current" class="muted"></p>
+            <h3>Cloud sync</h3>
+            <p id="cloud-loading" class="muted">checking…</p>
 
-            <div class="settings-row">
-              <button id="provider-check-btn" type="button">Check connection</button>
-              <span id="provider-status-msg" class="muted"></span>
+            <div id="cloud-connected" class="hidden">
+              <div id="cloud-connected-title" class="cloud-title"></div>
+              <p id="cloud-connected-detail" class="muted"></p>
+              <div class="settings-row">
+                <button id="cloud-check-btn" type="button">Check connection</button>
+                <button id="cloud-disconnect-btn" type="button" class="danger">Disconnect</button>
+                <span id="cloud-confirm" class="hidden">
+                  <span class="muted">Stop syncing with this cloud?</span>
+                  <button id="cloud-disconnect-yes" type="button" class="danger">Disconnect</button>
+                  <button id="cloud-disconnect-no" type="button">Cancel</button>
+                </span>
+                <span id="cloud-msg" class="muted"></span>
+              </div>
             </div>
 
-            <div class="provider-option">
-              <div class="provider-option-header">
-                <strong>OneDrive</strong>
-                <button id="provider-onedrive-btn" type="button">Use OneDrive</button>
-              </div>
-              <div class="settings-row">
-                <button id="provider-auth-btn" type="button">Sign in…</button>
-                <span id="provider-auth-msg" class="muted"></span>
-              </div>
-            </div>
+            <div id="cloud-disconnected" class="hidden">
+              <p id="cloud-disconnected-note" class="muted"></p>
 
-            <div class="provider-option">
-              <div class="provider-option-header">
-                <strong>Local folder</strong>
+              <div class="provider-option">
+                <div class="provider-option-header"><strong>OneDrive</strong></div>
+                <div id="onedrive-buttons" class="settings-row">
+                  <button id="signin-qr-btn" type="button" class="primary">Sign in with a phone (QR code)</button>
+                  <button id="signin-browser-btn" type="button">Sign in with a browser</button>
+                  <span id="signin-msg" class="muted"></span>
+                </div>
+                <div id="qr-panel" class="qr-panel hidden">
+                  <img id="qr-img" alt="QR code for the Microsoft sign-in page" />
+                  <div class="qr-text">
+                    <p class="muted">On your phone, scan the code or open</p>
+                    <p><strong id="qr-link"></strong></p>
+                    <p class="muted">and enter this code:</p>
+                    <div id="qr-code" class="qr-user-code"></div>
+                    <p id="qr-status" class="muted"></p>
+                    <button id="qr-cancel-btn" type="button">Cancel</button>
+                  </div>
+                </div>
               </div>
-              <div class="settings-row">
-                <input id="provider-local-path" type="text" placeholder="/path/to/sync/folder" />
-                <button id="provider-local-browse-btn" type="button">Browse…</button>
-                <button id="provider-local-btn" type="button">Use this folder</button>
+
+              <div class="provider-option">
+                <div class="provider-option-header"><strong>A folder</strong>
+                  <span class="muted">(e.g. one synced by Dropbox or Syncthing)</span></div>
+                <div class="settings-row">
+                  <input id="provider-local-path" type="text" placeholder="/path/to/sync/folder" />
+                  <button id="provider-local-browse-btn" type="button">Browse…</button>
+                  <button id="provider-local-btn" type="button">Use this folder</button>
+                </div>
               </div>
             </div>
           </section>

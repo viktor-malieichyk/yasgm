@@ -27,12 +27,6 @@ let navLibraryEl;
 let navSettingsEl;
 let libraryViewEl;
 let settingsViewEl;
-let providerCurrentEl;
-let providerCheckBtnEl;
-let providerStatusMsgEl;
-let providerOnedriveBtnEl;
-let providerAuthBtnEl;
-let providerAuthMsgEl;
 let providerLocalPathEl;
 let providerLocalBrowseBtnEl;
 let providerLocalBtnEl;
@@ -472,53 +466,136 @@ function renderVersionRow(v) {
   return row;
 }
 
-// ---- settings: cloud provider ---------------------------------------------
+// ---- settings: cloud sync ---------------------------------------------------
 
-function describeProvider(p) {
-  return p.type === "onedrive" ? "OneDrive" : `Local folder — ${p.path}`;
-}
+const cloudEls = {};
+let signingIn = false;
 
+// One provider at a time, and connecting one *is* choosing it, so there's no
+// provider switch: this shows what you're connected to (with Disconnect), or
+// the ways to connect.
 async function loadProvider() {
+  cloudEls.loading.classList.remove("hidden");
+  cloudEls.connected.classList.add("hidden");
+  cloudEls.disconnected.classList.add("hidden");
+  let s;
   try {
-    const p = await invoke("get_provider");
-    providerCurrentEl.textContent = `Current provider: ${describeProvider(p)}`;
-    providerLocalPathEl.value = p.type === "local" ? p.path : "";
+    s = await invoke("get_cloud_status");
   } catch (err) {
-    providerCurrentEl.textContent = `error loading provider: ${err}`;
+    cloudEls.loading.textContent = `couldn't read the cloud settings: ${err}`;
+    return;
   }
+  cloudEls.loading.classList.add("hidden");
+  cloudEls.confirm.classList.add("hidden");
+  cloudEls.disconnectBtn.classList.remove("hidden");
+  cloudEls.msg.textContent = "";
+
+  const connected = s.provider.type === "local" || (s.provider.type === "onedrive" && s.signed_in);
+  if (connected) {
+    cloudEls.connected.classList.remove("hidden");
+    cloudEls.title.textContent = s.provider.type === "local" ? `Folder: ${s.provider.path}` : "OneDrive";
+    cloudEls.detail.textContent = s.ok ? s.detail : `Not working right now: ${s.error}`;
+    return;
+  }
+  cloudEls.disconnected.classList.remove("hidden");
+  cloudEls.note.textContent =
+    s.provider.type === "onedrive"
+      ? "You're signed out of OneDrive. Sign in again to keep syncing."
+      : "Not connected — your saves aren't being backed up. Connect a cloud:";
+  const busy = signingIn;
+  cloudEls.qrPanel.classList.toggle("hidden", !busy);
+  cloudEls.onedriveButtons.classList.toggle("hidden", busy);
 }
 
 async function checkProviderStatus() {
-  providerStatusMsgEl.textContent = "checking…";
+  cloudEls.msg.textContent = "checking…";
   try {
-    const result = await invoke("cloud_status");
-    providerStatusMsgEl.textContent = result.trim();
+    const s = await invoke("get_cloud_status");
+    cloudEls.msg.textContent = s.ok ? "connected" : `not working: ${s.error}`;
+    cloudEls.detail.textContent = s.ok ? s.detail : `Not working right now: ${s.error}`;
   } catch (err) {
-    providerStatusMsgEl.textContent = `not ready: ${err}`;
+    cloudEls.msg.textContent = `check failed: ${err}`;
   }
 }
 
-async function useOnedrive() {
-  setStatus("switching to OneDrive…");
+async function disconnectProvider() {
+  cloudEls.msg.textContent = "disconnecting…";
   try {
-    const result = await invoke("set_provider_onedrive");
-    setStatus(result.trim() || "switched to OneDrive");
-    await loadProvider();
+    const result = await invoke("disconnect_provider");
+    setStatus(result.trim());
   } catch (err) {
-    setStatus(`switch failed: ${err}`);
+    setStatus(`disconnect failed: ${err}`);
   }
+  await loadProvider();
 }
 
-async function signInOnedrive() {
-  providerAuthMsgEl.textContent = "opening browser for sign-in…";
-  providerAuthBtnEl.disabled = true;
+async function signInWithBrowser() {
+  cloudEls.signinMsg.textContent = "opening your browser…";
+  cloudEls.signinBrowserBtn.disabled = true;
+  cloudEls.signinQrBtn.disabled = true;
   try {
-    const result = await invoke("cloud_auth");
-    providerAuthMsgEl.textContent = result.trim().split("\n")[0] || "signed in";
+    await invoke("cloud_auth");
+    cloudEls.signinMsg.textContent = "";
   } catch (err) {
-    providerAuthMsgEl.textContent = `sign-in failed: ${err}`;
+    cloudEls.signinMsg.textContent = `sign-in failed: ${err}`;
   } finally {
-    providerAuthBtnEl.disabled = false;
+    cloudEls.signinBrowserBtn.disabled = false;
+    cloudEls.signinQrBtn.disabled = false;
+  }
+  await loadProvider();
+}
+
+// Device-code sign-in: the CLI streams JSON events (`auth-event`); the page
+// shows a QR code of the Microsoft link plus the code to type on a phone.
+async function signInWithQr() {
+  signingIn = true;
+  cloudEls.signinMsg.textContent = "";
+  cloudEls.onedriveButtons.classList.add("hidden");
+  cloudEls.qrPanel.classList.remove("hidden");
+  cloudEls.qrImg.removeAttribute("src");
+  cloudEls.qrLink.textContent = "";
+  cloudEls.qrCode.textContent = "…";
+  cloudEls.qrStatus.textContent = "getting a sign-in code…";
+  try {
+    await invoke("start_device_sign_in");
+  } catch (err) {
+    endQrSignIn(`couldn't start sign-in: ${err}`);
+  }
+}
+
+function endQrSignIn(message) {
+  signingIn = false;
+  cloudEls.qrPanel.classList.add("hidden");
+  cloudEls.onedriveButtons.classList.remove("hidden");
+  cloudEls.signinMsg.textContent = message || "";
+}
+
+async function cancelQrSignIn() {
+  await invoke("cancel_device_sign_in").catch(() => {});
+  endQrSignIn();
+}
+
+function onAuthEvent(event) {
+  if (!signingIn) return;
+  switch (event.event) {
+    case "code": {
+      const qr = qrcode(0, "M");
+      qr.addData(event.verification_uri);
+      qr.make();
+      cloudEls.qrImg.src = qr.createDataURL(5, 2);
+      cloudEls.qrLink.textContent = event.verification_uri.replace(/^https?:\/\//, "");
+      cloudEls.qrCode.textContent = event.user_code;
+      cloudEls.qrStatus.textContent = `waiting for you to sign in… (code valid for ${Math.round(event.expires_in / 60)} minutes)`;
+      break;
+    }
+    case "signed_in":
+      endQrSignIn();
+      setStatus("signed in to OneDrive");
+      loadProvider();
+      break;
+    case "error":
+      endQrSignIn(`sign-in failed: ${event.message}`);
+      break;
   }
 }
 
@@ -539,13 +616,13 @@ async function useLocalFolder() {
     setStatus("enter a folder path first");
     return;
   }
-  setStatus(`switching to local folder ${path}…`);
+  setStatus(`connecting the folder ${path}…`);
   try {
     const result = await invoke("set_provider_local", { path });
-    setStatus(result.trim() || "switched to local folder");
+    setStatus(result.trim() || "folder connected");
     await loadProvider();
   } catch (err) {
-    setStatus(`switch failed: ${err}`);
+    setStatus(`couldn't use that folder: ${err}`);
   }
 }
 
@@ -656,12 +733,26 @@ window.addEventListener("DOMContentLoaded", () => {
   navSettingsEl = document.querySelector("#nav-settings");
   libraryViewEl = document.querySelector("#library-view");
   settingsViewEl = document.querySelector("#settings-view");
-  providerCurrentEl = document.querySelector("#provider-current");
-  providerCheckBtnEl = document.querySelector("#provider-check-btn");
-  providerStatusMsgEl = document.querySelector("#provider-status-msg");
-  providerOnedriveBtnEl = document.querySelector("#provider-onedrive-btn");
-  providerAuthBtnEl = document.querySelector("#provider-auth-btn");
-  providerAuthMsgEl = document.querySelector("#provider-auth-msg");
+  Object.assign(cloudEls, {
+    loading: document.querySelector("#cloud-loading"),
+    connected: document.querySelector("#cloud-connected"),
+    disconnected: document.querySelector("#cloud-disconnected"),
+    title: document.querySelector("#cloud-connected-title"),
+    detail: document.querySelector("#cloud-connected-detail"),
+    msg: document.querySelector("#cloud-msg"),
+    confirm: document.querySelector("#cloud-confirm"),
+    disconnectBtn: document.querySelector("#cloud-disconnect-btn"),
+    note: document.querySelector("#cloud-disconnected-note"),
+    onedriveButtons: document.querySelector("#onedrive-buttons"),
+    signinQrBtn: document.querySelector("#signin-qr-btn"),
+    signinBrowserBtn: document.querySelector("#signin-browser-btn"),
+    signinMsg: document.querySelector("#signin-msg"),
+    qrPanel: document.querySelector("#qr-panel"),
+    qrImg: document.querySelector("#qr-img"),
+    qrLink: document.querySelector("#qr-link"),
+    qrCode: document.querySelector("#qr-code"),
+    qrStatus: document.querySelector("#qr-status"),
+  });
   providerLocalPathEl = document.querySelector("#provider-local-path");
   providerLocalBrowseBtnEl = document.querySelector("#provider-local-browse-btn");
   providerLocalBtnEl = document.querySelector("#provider-local-btn");
@@ -692,9 +783,20 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  providerCheckBtnEl.addEventListener("click", checkProviderStatus);
-  providerOnedriveBtnEl.addEventListener("click", useOnedrive);
-  providerAuthBtnEl.addEventListener("click", signInOnedrive);
+  document.querySelector("#cloud-check-btn").addEventListener("click", checkProviderStatus);
+  cloudEls.disconnectBtn.addEventListener("click", () => {
+    cloudEls.disconnectBtn.classList.add("hidden");
+    cloudEls.confirm.classList.remove("hidden");
+  });
+  document.querySelector("#cloud-disconnect-no").addEventListener("click", () => {
+    cloudEls.confirm.classList.add("hidden");
+    cloudEls.disconnectBtn.classList.remove("hidden");
+  });
+  document.querySelector("#cloud-disconnect-yes").addEventListener("click", disconnectProvider);
+  cloudEls.signinQrBtn.addEventListener("click", signInWithQr);
+  cloudEls.signinBrowserBtn.addEventListener("click", signInWithBrowser);
+  document.querySelector("#qr-cancel-btn").addEventListener("click", cancelQrSignIn);
+  window.__TAURI__.event.listen("auth-event", (e) => onAuthEvent(e.payload));
   providerLocalBrowseBtnEl.addEventListener("click", browseLocalFolder);
   providerLocalBtnEl.addEventListener("click", useLocalFolder);
   autostartToggleEl.addEventListener("change", toggleAutostart);

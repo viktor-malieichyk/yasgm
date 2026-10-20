@@ -50,6 +50,17 @@ fn token_path() -> Result<PathBuf> {
     Ok(dir.join("tokens.json"))
 }
 
+/// Removes the cached sign-in from this device (disconnect). The access
+/// YASGM was granted on the Microsoft account itself stays until revoked at
+/// https://account.live.com/consent/Manage.
+pub fn delete_tokens() -> Result<()> {
+    match fs::remove_file(token_path()?) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("removing the cached OneDrive sign-in"),
+    }
+}
+
 pub fn save_tokens(tokens: &Tokens) -> Result<()> {
     let path = token_path()?;
     // 0600 is applied to the temp file before the rename, so the token file

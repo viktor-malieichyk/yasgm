@@ -104,8 +104,12 @@ fn build_store(account: String, cfg: &config::Config) -> Result<Store> {
         config::ProviderConfig::Local { path } => {
             Store::new(Box::new(local::LocalFolderProvider::new(path.clone())), account)
         }
+        config::ProviderConfig::None => anyhow::bail!(NOT_CONNECTED),
     }
 }
+
+const NOT_CONNECTED: &str = "no cloud provider connected — sign in with `yasgm auth` (OneDrive) or choose a \
+     folder with `yasgm provider local <path>`";
 
 /// Steam account + cloud store without loading the manifest (for commands
 /// that only touch cloud versions).
@@ -468,9 +472,18 @@ fn auth(args: &[String]) -> Result<()> {
     }
     let tokens = if flag(args, "--device") {
         onedrive::login_device(&|event| match event {
-            onedrive::DeviceEvent::Code { message: Some(message), .. } => println!("{message}"),
-            onedrive::DeviceEvent::Code { user_code, verification_uri, .. } => {
-                println!("Visit {verification_uri} on any device and enter the code {user_code}")
+            onedrive::DeviceEvent::Code { user_code, verification_uri, message, .. } => {
+                match message {
+                    Some(message) => println!("{message}"),
+                    None => println!("Visit {verification_uri} on any device and enter the code {user_code}"),
+                }
+                // Scan with a phone instead of typing the link.
+                if let Ok(code) = qrcode::QrCode::new(verification_uri.as_bytes()) {
+                    println!(
+                        "\n{}\n",
+                        code.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build()
+                    );
+                }
             }
             onedrive::DeviceEvent::Waiting { elapsed } => eprintln!("  still waiting for sign-in… ({elapsed}s elapsed)"),
         })?
@@ -478,8 +491,20 @@ fn auth(args: &[String]) -> Result<()> {
         onedrive::login_interactive()?
     };
     onedrive::save_tokens(&tokens)?;
+    connect_onedrive()?;
     println!("Sign-in successful; tokens cached.\n");
     verify_cloud(&tokens.access_token)
+}
+
+/// Signing in is choosing OneDrive: a disconnected install becomes a
+/// OneDrive one (a LocalFolder install never gets here — `auth` refuses).
+fn connect_onedrive() -> Result<()> {
+    let mut cfg = config::Config::load();
+    if matches!(cfg.provider, config::ProviderConfig::None) {
+        cfg.provider = config::ProviderConfig::Onedrive;
+        cfg.save()?;
+    }
+    Ok(())
 }
 
 /// `auth --device --json`: one JSON object per line, for a UI (the Decky
@@ -505,6 +530,7 @@ fn auth_device_json() -> Result<()> {
     })
     .and_then(|tokens| {
         onedrive::save_tokens(&tokens)?;
+        connect_onedrive()?;
         cloud_summary(&tokens.access_token)
     });
     match result {
@@ -561,6 +587,7 @@ fn status(args: &[String]) -> Result<()> {
         config::ProviderConfig::Local { path } => {
             (serde_json::json!({"type": "local", "path": path}), serde_json::Value::Null)
         }
+        config::ProviderConfig::None => (serde_json::json!({"type": "none"}), serde_json::Value::Null),
     };
     println!(
         "{}",
@@ -579,6 +606,7 @@ fn status(args: &[String]) -> Result<()> {
 /// `Ok(summary)` if the configured provider is reachable and writable.
 fn check_provider(provider: &config::ProviderConfig) -> Result<String> {
     match provider {
+        config::ProviderConfig::None => anyhow::bail!(NOT_CONNECTED),
         config::ProviderConfig::Onedrive => cloud_summary(&onedrive::ensure_access_token()?),
         config::ProviderConfig::Local { path } => {
             let meta = std::fs::metadata(&path)
@@ -603,6 +631,27 @@ fn provider_cmd(args: &[String]) -> Result<()> {
             cfg.save()?;
             println!("cloud provider set to OneDrive");
         }
+        Some("disconnect") => {
+            let was = std::mem::replace(&mut cfg.provider, config::ProviderConfig::None);
+            cfg.save()?;
+            let detail = match was {
+                config::ProviderConfig::Onedrive => {
+                    onedrive::delete_tokens()?;
+                    "signed out of OneDrive on this device. Your saves in OneDrive are untouched; to also revoke \
+                     YASGM's access, visit https://account.live.com/consent/Manage"
+                        .to_owned()
+                }
+                config::ProviderConfig::Local { path } => {
+                    format!("stopped using the folder {} (its contents are untouched)", path.display())
+                }
+                config::ProviderConfig::None => "no cloud provider was connected".to_owned(),
+            };
+            if flag(args, "--json") {
+                println!("{}", serde_json::json!({"type": "none", "detail": detail}));
+            } else {
+                println!("disconnected: {detail}");
+            }
+        }
         Some("local") => {
             let raw = pos.get(1).context("usage: yasgm provider local <path>")?;
             std::fs::create_dir_all(raw).with_context(|| format!("creating {raw}"))?;
@@ -618,6 +667,7 @@ fn provider_cmd(args: &[String]) -> Result<()> {
                     config::ProviderConfig::Local { path } => {
                         serde_json::json!({"type": "local", "path": path})
                     }
+                    config::ProviderConfig::None => serde_json::json!({"type": "none"}),
                 };
                 println!("{}", serde_json::to_string(&json)?);
             } else {
@@ -626,11 +676,12 @@ fn provider_cmd(args: &[String]) -> Result<()> {
                     config::ProviderConfig::Local { path } => {
                         println!("cloud provider: local folder at {}", path.display())
                     }
+                    config::ProviderConfig::None => println!("cloud provider: none (disconnected)"),
                 }
             }
         }
         Some(other) => {
-            anyhow::bail!("usage: yasgm provider [onedrive|local <path>|status] (got {other:?})")
+            anyhow::bail!("usage: yasgm provider [onedrive|local <path>|disconnect|status] (got {other:?})")
         }
     }
     Ok(())
@@ -704,6 +755,7 @@ fn backup_location_cmd(args: &[String]) -> Result<()> {
                 .with_context(|| format!("creating {}", game_dir.display()))?;
             serde_json::json!({"kind": "local", "path": game_dir})
         }
+        config::ProviderConfig::None => anyhow::bail!(NOT_CONNECTED),
     };
     println!("{}", serde_json::to_string(&json)?);
     Ok(())
@@ -1028,6 +1080,10 @@ impl EventLog {
 
     /// `run_sync` for the daemon: its events (or its failure) are logged.
     fn sync(&mut self, only: Option<u64>) -> Result<()> {
+        // Disconnected on purpose: nothing to sync, and nothing to report.
+        if matches!(config::Config::load().provider, config::ProviderConfig::None) {
+            return Ok(());
+        }
         match run_sync(only, false) {
             Ok(events) => {
                 events.into_iter().for_each(|e| self.record(e));
@@ -2266,7 +2322,7 @@ fn main() -> Result<()> {
                  doctor\n  auth [--device [--json]]\n  status [--json]\n  games [--json]\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
                  watch [--settle <secs>] [--tray] | watch status|start|stop [--json] | watch send <request>\n  autostart [on|off|status] [--json]\n  \
-                 provider [onedrive|local <path>|status] [--json]\n  \
+                 provider [onedrive|local <path>|disconnect|status] [--json]\n  \
                  paths <appid>\n  backup-location <appid>\n  \
                  pending-location <appid>\n  \
                  backup [appid] [--dry-run]\n  \
