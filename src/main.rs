@@ -814,7 +814,87 @@ fn run_cmd(args: &[String]) -> Result<()> {
 // ---- watch (daemon) --------------------------------------------------------
 
 /// Existing on-disk save roots to watch, per eligible game.
-fn watch_roots(ctx: &Ctx, cfg: &config::Config) -> Vec<(u64, PathBuf)> {
+/// Which game the daemon considers running, with an exit grace period: a
+/// game only counts as exited after being gone for `EXIT_GRACE`. Proton
+/// runs a short setup step under Steam's launcher, exits it, and starts the
+/// real game seconds later (seen on SteamOS); without the grace the daemon
+/// synced mid-launch.
+struct GameSession {
+    active: Option<u64>,
+    gone_since: Option<std::time::Instant>,
+}
+
+impl GameSession {
+    const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn new(running: Option<u64>) -> GameSession {
+        GameSession { active: running, gone_since: None }
+    }
+
+    /// Feeds one detector poll (`seen`); returns the game that just exited.
+    fn update(&mut self, seen: Option<u64>, now: std::time::Instant) -> Option<u64> {
+        let exited = match self.active {
+            Some(game) if seen == Some(game) => {
+                self.gone_since = None;
+                None
+            }
+            // Another game took over: the previous one is done for sure.
+            Some(game) if seen.is_some() => Some(game),
+            Some(game) => {
+                let since = *self.gone_since.get_or_insert(now);
+                (now.duration_since(since) >= Self::EXIT_GRACE).then_some(game)
+            }
+            None => None,
+        };
+        if exited.is_some() || self.active.is_none() {
+            self.active = seen;
+            self.gone_since = None;
+        }
+        exited
+    }
+}
+
+/// One save location the daemon watches.
+#[derive(Debug, Clone, PartialEq)]
+struct WatchRoot {
+    app_id: u64,
+    /// An existing save directory, or a save file.
+    root: PathBuf,
+    is_dir: bool,
+    /// The rule's resolved path pattern, so a new file in a file root's
+    /// folder (`Game3.dat` for `Game*.dat`) counts too.
+    pattern: String,
+}
+
+impl WatchRoot {
+    /// What to register with the OS watcher: a directory recursively, plus
+    /// its parent non-recursively to see the directory itself being
+    /// removed/recreated; for a file only its folder, non-recursively. Never
+    /// a whole parent tree — `~/.local/share` recursively would pull in every
+    /// app's data and, through Proton prefixes' `dosdevices/z:` link, the
+    /// entire filesystem.
+    fn watches(&self) -> Vec<(PathBuf, notify::RecursiveMode)> {
+        let parent = self.root.parent().map(Path::to_path_buf);
+        let mut out = Vec::new();
+        if self.is_dir {
+            out.push((self.root.clone(), notify::RecursiveMode::Recursive));
+        }
+        if let Some(parent) = parent {
+            out.push((parent, notify::RecursiveMode::NonRecursive));
+        }
+        out
+    }
+
+    /// Does a change at `path` concern this save location?
+    fn covers(&self, path: &Path) -> bool {
+        if self.is_dir {
+            return path.starts_with(&self.root);
+        }
+        path == self.root || glob::Pattern::new(&self.pattern).is_ok_and(|p| p.matches_path(path))
+    }
+}
+
+fn watch_roots(ctx: &Ctx, cfg: &config::Config) -> Vec<WatchRoot> {
     let mut roots = Vec::new();
     for game in &ctx.games {
         if cfg.game(game.app_id).mode == ModeOverride::Off {
@@ -828,16 +908,36 @@ fn watch_roots(ctx: &Ctx, cfg: &config::Config) -> Vec<(u64, PathBuf)> {
             let Some(res) = resolve::resolve_rule(template, rule, ctx.os, game) else { continue };
             let Some(pattern) = res.path else { continue };
             for root in resolve::existing_matches(&pattern) {
-                // Watch the parent so deletes/renames of the root itself are
-                // seen too; fall back to the root when there is no parent.
-                let watch = root.parent().map(Path::to_path_buf).unwrap_or(root);
-                if !roots.iter().any(|(id, p)| *id == game.app_id && *p == watch) {
-                    roots.push((game.app_id, watch));
+                let entry = WatchRoot { app_id: game.app_id, is_dir: root.is_dir(), root, pattern: pattern.clone() };
+                if !roots.contains(&entry) {
+                    roots.push(entry);
                 }
             }
         }
     }
     roots
+}
+
+/// Registers `root`'s OS watches not already registered (a path watched
+/// recursively needs no extra non-recursive watch).
+fn register_watches(
+    watcher: &mut impl notify::Watcher,
+    registered: &mut HashMap<PathBuf, notify::RecursiveMode>,
+    root: &WatchRoot,
+) {
+    for (path, mode) in root.watches() {
+        match registered.get(&path) {
+            Some(notify::RecursiveMode::Recursive) => continue,
+            Some(_) if mode == notify::RecursiveMode::NonRecursive => continue,
+            _ => {}
+        }
+        match watcher.watch(&path, mode) {
+            Ok(()) => {
+                registered.insert(path, mode);
+            }
+            Err(err) => eprintln!("cannot watch {}: {err}", path.display()),
+        }
+    }
 }
 
 /// Control messages from the tray (or any future UI) into the watch loop.
@@ -1012,13 +1112,11 @@ fn watch_loop(
         let _ = tx.send(event);
     })?;
     let mut roots = watch_roots(&ctx, &cfg);
-    for (_, path) in &roots {
-        use notify::Watcher;
-        if let Err(err) = watcher.watch(path, notify::RecursiveMode::Recursive) {
-            eprintln!("cannot watch {}: {err}", path.display());
-        }
+    let mut registered = HashMap::new();
+    for root in &roots {
+        register_watches(&mut watcher, &mut registered, root);
     }
-    let n_games = roots.iter().map(|(id, _)| id).collect::<std::collections::HashSet<_>>().len();
+    let n_games = roots.iter().map(|r| r.app_id).collect::<std::collections::HashSet<_>>().len();
     println!(
         "watching {} paths across {n_games} games (settle {}s); Ctrl-C to stop",
         roots.len(),
@@ -1028,20 +1126,21 @@ fn watch_loop(
 
     let mut dirty: HashMap<u64, Instant> = HashMap::new();
     let mut detector = running::RunningDetector::new();
-    let mut last_running = detector.poll(&ctx.root, &ctx.games);
+    let mut session = GameSession::new(detector.poll(&ctx.root, &ctx.games));
     let mut last_rescan = Instant::now();
     let mut paused = false;
 
     let handle_event = |event: notify::Result<notify::Event>,
                             dirty: &mut HashMap<u64, Instant>,
-                            roots: &[(u64, PathBuf)]| {
+                            roots: &[WatchRoot]| {
         let Ok(event) = event else { return };
+        if event.kind.is_access() {
+            return; // reads (e.g. our own snapshot) aren't changes
+        }
         for path in &event.paths {
-            for (app_id, root) in roots {
-                if path.starts_with(root) {
-                    if dirty.insert(*app_id, Instant::now()).is_none() {
-                        println!("change detected for app {app_id} ({})", path.display());
-                    }
+            for root in roots.iter().filter(|r| r.covers(path)) {
+                if dirty.insert(root.app_id, Instant::now()).is_none() {
+                    println!("change detected for app {} ({})", root.app_id, path.display());
                 }
             }
         }
@@ -1084,9 +1183,11 @@ fn watch_loop(
             }
         }
 
-        let running_now = detector.poll(&ctx.root, &ctx.games);
-        if let Some(prev) = last_running {
-            if running_now != Some(prev) && !paused {
+        let exited = session.update(detector.poll(&ctx.root, &ctx.games), Instant::now());
+        // Still "running" during the exit grace period, so settled saves wait too.
+        let running_now = session.active;
+        if let Some(prev) = exited {
+            if !paused {
                 println!("app {prev} exited — syncing");
                 report("game exited — syncing…");
                 match run_sync(Some(prev), false) {
@@ -1099,7 +1200,6 @@ fn watch_loop(
                 dirty.remove(&prev);
             }
         }
-        last_running = running_now;
 
         if !paused {
             let settled: Vec<u64> = dirty
@@ -1127,14 +1227,9 @@ fn watch_loop(
         if last_rescan.elapsed() >= RESCAN_EVERY {
             last_rescan = Instant::now();
             let fresh = watch_roots(&ctx, &cfg);
-            for (app_id, path) in &fresh {
-                if !roots.iter().any(|(id, p)| id == app_id && p == path) {
-                    use notify::Watcher;
-                    match watcher.watch(path, notify::RecursiveMode::Recursive) {
-                        Ok(()) => println!("now watching {} (app {app_id})", path.display()),
-                        Err(err) => eprintln!("cannot watch {}: {err}", path.display()),
-                    }
-                }
+            for root in fresh.iter().filter(|r| !roots.contains(r)) {
+                register_watches(&mut watcher, &mut registered, root);
+                println!("now watching {} (app {})", root.root.display(), root.app_id);
             }
             roots = fresh;
         }
@@ -1682,7 +1777,8 @@ fn selftest() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_run_args;
+    use super::{parse_run_args, GameSession, WatchRoot};
+    use std::path::{Path, PathBuf};
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -1700,6 +1796,68 @@ mod tests {
         let (app, cmd) = parse_run_args(&s(&["run", "game.exe", "--app", "7"]));
         assert_eq!(app, None);
         assert_eq!(cmd, s(&["game.exe", "--app", "7"]));
+    }
+
+    #[test]
+    fn proton_setup_gap_is_not_an_exit() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut session = GameSession::new(None);
+        // Proton setup step runs, exits, real game starts 3 s later.
+        assert_eq!(session.update(Some(2140020), at(0)), None);
+        assert_eq!(session.update(None, at(1)), None);
+        assert_eq!(session.active, Some(2140020), "still running during the grace period");
+        assert_eq!(session.update(None, at(3)), None);
+        assert_eq!(session.update(Some(2140020), at(4)), None);
+        // Real exit: reported once, after the grace period.
+        assert_eq!(session.update(None, at(60)), None);
+        assert_eq!(session.update(None, at(65)), None);
+        assert_eq!(session.update(None, at(70)), Some(2140020));
+        assert_eq!(session.active, None);
+        assert_eq!(session.update(None, at(80)), None, "no second exit");
+    }
+
+    #[test]
+    fn switching_games_exits_the_previous_one_immediately() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let mut session = GameSession::new(Some(1));
+        assert_eq!(session.update(Some(2), now), Some(1));
+        assert_eq!(session.active, Some(2));
+    }
+
+    #[test]
+    fn watch_root_ignores_siblings_of_a_save_directory() {
+        let root = WatchRoot {
+            app_id: 736260,
+            root: PathBuf::from("/home/u/.local/share/Baba_Is_You"),
+            is_dir: true,
+            pattern: "/home/u/.local/share/Baba_Is_You".into(),
+        };
+        assert!(root.covers(Path::new("/home/u/.local/share/Baba_Is_You/ba.ba")));
+        assert!(root.covers(Path::new("/home/u/.local/share/Baba_Is_You")));
+        assert!(!root.covers(Path::new("/home/u/.local/share/sddm/state.conf")));
+        assert!(!root.covers(Path::new("/home/u/.local/share/Baba_Is_You_old/x")));
+        // Never the parent tree recursively.
+        let watches = root.watches();
+        assert!(watches.contains(&(PathBuf::from("/home/u/.local/share/Baba_Is_You"), notify::RecursiveMode::Recursive)));
+        assert!(watches.contains(&(PathBuf::from("/home/u/.local/share"), notify::RecursiveMode::NonRecursive)));
+        assert!(!watches.contains(&(PathBuf::from("/home/u/.local/share"), notify::RecursiveMode::Recursive)));
+    }
+
+    #[test]
+    fn watch_root_for_a_file_pattern_catches_new_matching_files_only() {
+        let root = WatchRoot {
+            app_id: 331920,
+            root: PathBuf::from("/games/ATD/Savegame/Game1.dat"),
+            is_dir: false,
+            pattern: "/games/ATD/Savegame/Game*.dat".into(),
+        };
+        assert!(root.covers(Path::new("/games/ATD/Savegame/Game1.dat")));
+        assert!(root.covers(Path::new("/games/ATD/Savegame/Game7.dat")), "a new save matching the pattern");
+        assert!(!root.covers(Path::new("/games/ATD/Savegame/Options.cfg")));
+        assert_eq!(root.watches(), vec![(PathBuf::from("/games/ATD/Savegame"), notify::RecursiveMode::NonRecursive)]);
     }
 
     #[test]

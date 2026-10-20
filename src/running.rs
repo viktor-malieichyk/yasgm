@@ -57,6 +57,25 @@ fn steam_reported_app_id(steam_root: &Path) -> Option<u64> {
     None
 }
 
+/// The app a process belongs to, from how Steam launched it. Linux Steam
+/// starts every game under `reaper SteamLaunch AppId=<id> -- …`, alive for
+/// the whole session, and game processes inherit `SteamAppId=<id>`. Unlike
+/// the exe-path check this works when the visible executable isn't in the
+/// install dir — Proton's Wine loader, or FEX emulating x86 on ARM — and
+/// SteamOS doesn't keep `RunningAppID` in registry.vdf current (observed in
+/// the steamac VM: never set while Stronghold or Baba Is You ran).
+fn steam_launch_app_id(cmd: &[std::ffi::OsString], environ: &[std::ffi::OsString]) -> Option<u64> {
+    let arg_id = |prefix: &str, list: &[std::ffi::OsString]| {
+        list.iter().find_map(|a| a.to_str()?.strip_prefix(prefix)?.parse::<u64>().ok())
+    };
+    if cmd.iter().any(|a| a == "SteamLaunch") {
+        if let Some(id) = arg_id("AppId=", cmd) {
+            return Some(id);
+        }
+    }
+    arg_id("SteamAppId=", environ).filter(|id| *id != 0)
+}
+
 pub struct RunningDetector {
     system: System,
 }
@@ -112,12 +131,21 @@ impl RunningDetector {
             .iter()
             .map(|g| (g.app_id, g.library.join("steamapps/common").join(&g.install_dir)))
             .collect();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
-        );
+        // cmd/environ only matter on Linux (see steam_launch_app_id); a
+        // process's /proc environ never changes, so caching is fine.
+        let refresh = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet);
+        let refresh = if cfg!(target_os = "linux") {
+            refresh.with_cmd(UpdateKind::OnlyIfNotSet).with_environ(UpdateKind::OnlyIfNotSet)
+        } else {
+            refresh
+        };
+        self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
         for process in self.system.processes().values() {
+            if let Some(app_id) = steam_launch_app_id(process.cmd(), process.environ()) {
+                if games.iter().any(|g| g.app_id == app_id) {
+                    return Some(app_id);
+                }
+            }
             let Some(exe) = process.exe() else { continue };
             for (app_id, dir) in &install_dirs {
                 if exe.starts_with(dir) {
@@ -126,5 +154,34 @@ impl RunningDetector {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(v: &[&str]) -> Vec<std::ffi::OsString> {
+        v.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn reads_app_id_from_steams_reaper_command_line() {
+        let cmd = os(&["/home/u/.local/share/Steam/ubuntu12_32/reaper", "SteamLaunch", "AppId=2140020", "--", "/x/proton"]);
+        assert_eq!(steam_launch_app_id(&cmd, &[]), Some(2140020));
+    }
+
+    #[test]
+    fn reads_app_id_from_inherited_environment() {
+        let env = os(&["HOME=/home/u", "SteamAppId=736260", "SteamGameId=736260"]);
+        assert_eq!(steam_launch_app_id(&os(&["/usr/bin/FEXInterpreter", "Baba Is You/bin64/Chowdren"]), &env), Some(736260));
+    }
+
+    #[test]
+    fn ignores_unrelated_processes_and_zero_ids() {
+        assert_eq!(steam_launch_app_id(&os(&["/usr/bin/bash"]), &os(&["HOME=/home/u"])), None);
+        assert_eq!(steam_launch_app_id(&os(&["steam"]), &os(&["SteamAppId=0"])), None);
+        // "AppId=" without the SteamLaunch marker isn't Steam's launcher.
+        assert_eq!(steam_launch_app_id(&os(&["tool", "AppId=5"]), &[]), None);
     }
 }

@@ -644,9 +644,40 @@ Python `main.py`.
     `restore` warns before restoring a version from an OS it can't map.
     Unit tests use the real rule shapes of Hades, Celeste, Slay the Spire,
     Terraria, RimWorld, Nine Sols, Warhammer II, 911 Operator.
+  - **Headless `watch` daemon on SteamOS (steamac VM, 2026-10-20).**
+    Lock verified (second instance → exit 3 with the right pid; `setsid`-
+    detached daemon survives the SSH session). Three bugs found and fixed:
+    (1) **watched too much**: each save root's *parent* was watched
+    recursively and any change under it counted — for Baba Is You all of
+    `~/.local/share` (unrelated `sddm` writes triggered syncs), descending
+    into Proton prefixes whose `dosdevices/z:` links to `/` ("permission
+    denied … z:/efi"). Now `WatchRoot`: a save dir is watched recursively,
+    its parent only non-recursively (to see the dir itself vanish/appear);
+    a save file only via its folder, non-recursively; events count only
+    inside the save dir or matching the rule's file pattern (so a new
+    `Game3.dat` for `Game*.dat` still counts). Verified: an unrelated file
+    in `~/.local/share` → nothing; a file added to / removed from Baba's
+    save dir → backup after the 5 s settle each time. (2) **running games
+    not detected**: SteamOS never sets `RunningAppID` in `registry.vdf`
+    while a game runs, and the exe-path scan can't see Proton (Wine
+    loader) or FEX-emulated x86 games on ARM. `running.rs` now also reads
+    Steam's launcher: every Linux game runs under `reaper SteamLaunch
+    AppId=<id> -- …` for the whole session, and game processes inherit
+    `SteamAppId=<id>` (cmd/environ via sysinfo, Linux only) — the same
+    signal Steamback's desktop mode uses (Decky plugins use
+    `SteamClient.GameSessions.RegisterForAppLifetimeNotifications`
+    instead; to adopt in the Decky plugin). (3) **synced mid-launch**:
+    Proton runs a short setup step under the launcher, exits, and starts
+    the real game ~3 s later, so the daemon saw an exit in between.
+    `GameSession` now only reports an exit after the game has been gone
+    10 s (`EXIT_GRACE`), and keeps it "running" meanwhile so settled saves
+    wait too; switching to another game exits the previous one at once.
+    Verified with Stronghold (Proton): the Steam Cloud write at launch was
+    held, Steam ended the game at 06:09:53 and the daemon logged one exit
+    and synced at 06:10:05. Unit tests replay the observed launch.
   Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
-  the headless `watch` daemon on Linux; cross-restore Windows ↔ SteamOS
-  via a Proton prefix (needs a Windows machine). (Flatpak packaging moved to post-1.0 — SteamOS ships via
+  cross-restore Windows ↔ SteamOS via a Proton prefix (needs a Windows
+  machine); sleep/resume; real Deck (x86_64, user `deck`). (Flatpak packaging moved to post-1.0 — SteamOS ships via
   the Decky plugin, D21.)
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
   macOS; Linux paths written but unvalidated per 2026-07-20 direction).
