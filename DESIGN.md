@@ -1404,6 +1404,13 @@ and fast until the release is otherwise ready). Status is tracked inline.
    search field. Dev fix: `build-sidecar.sh` replaces sidecar copies
    instead of overwriting them — macOS SIGKILLs a binary rewritten in place
    (cached code signature), seen as exit 137.
+   **"No saves here" (2026-10-20):** `games`/`config --json` carry
+   `local_saves` (`snapshot::has_local_saves` — the same lookup `capture`
+   uses; null when the location is unknown; ~0.3 s for 11 games). Rows of
+   games whose save location is known but empty on this machine (never
+   played here, or not restored yet) get a greyed-out icon and a "No saves
+   here" subtitle, in the desktop GUI and the Decky panel; the detail
+   header / game page say "no saves on this computer/Deck yet".
 6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see
    [Test environment](#test-environment-steamac-vm)), then real Deck
    hardware for what the VM can't cover (carry-over from Phase 2):

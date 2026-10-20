@@ -70,6 +70,8 @@ interface Game {
   effective_mode: string;
   in_manifest: boolean;
   steam_cloud: boolean;
+  /** Save files exist on this Deck; null when the location isn't known. */
+  local_saves: boolean | null;
   cross_os_note: string | null;
   last_version: string | null;
   synced_at: number | null;
@@ -250,7 +252,9 @@ function useIcons() {
 
 function GameIcon({ game, icons, size = 28 }: { game: Game; icons: Record<string, string>; size?: number }) {
   const url = icons[String(game.app_id)];
-  const box = { width: size, height: size, borderRadius: 4, flexShrink: 0 } as const;
+  // Greyed out when there are no saves on this Deck yet.
+  const faded = game.local_saves === false ? { filter: "grayscale(1)", opacity: 0.45 } : {};
+  const box = { width: size, height: size, borderRadius: 4, flexShrink: 0, ...faded } as const;
   if (url) return <img src={url} style={box} />;
   const letter = (game.game.match(/[\p{L}\p{N}]/u) ?? ["?"])[0].toUpperCase();
   return (
@@ -622,7 +626,15 @@ function Content() {
               <ButtonItem
                 layout="below"
                 description={
-                  syncingThis ? "Syncing…" : g.synced_at ? `${shortMode(g)} · synced ${timeAgo(g.synced_at)}` : shortMode(g)
+                  syncingThis
+                    ? "Syncing…"
+                    : [
+                        g.local_saves === false && "No saves here",
+                        shortMode(g),
+                        g.synced_at && `synced ${timeAgo(g.synced_at)}`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")
                 }
                 onClick={() => {
                   Navigation.Navigate(`/yasgm/game/${g.app_id}`);
@@ -761,6 +773,7 @@ function GamePage() {
             <div style={muted}>
               {game.effective_mode}
               {game.steam_cloud && " · Steam Cloud already syncs this game"}
+              {game.local_saves === false && " · no saves on this Deck yet"}
             </div>
           )}
         </div>

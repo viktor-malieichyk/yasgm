@@ -215,7 +215,10 @@ function renderGamesList() {
     const item = document.createElement("button");
     item.type = "button";
     item.className =
-      "game-item" + (g.app_id === selectedAppId ? " selected" : "") + (g.in_manifest ? "" : " unsupported");
+      "game-item" +
+      (g.app_id === selectedAppId ? " selected" : "") +
+      (g.in_manifest ? "" : " unsupported") +
+      (g.local_saves === false ? " no-saves" : "");
     item.title = g.in_manifest ? g.game : `${g.game} — no save locations known for this game`;
     const text = document.createElement("span");
     text.className = "game-text";
@@ -224,7 +227,9 @@ function renderGamesList() {
     name.textContent = g.game;
     const sub = document.createElement("span");
     sub.className = "game-sub";
-    sub.textContent = shortMode(g);
+    // Known location but nothing there yet (never played here, or saves
+    // not restored yet).
+    sub.textContent = g.local_saves === false ? `No saves here · ${shortMode(g)}` : shortMode(g);
     text.append(name, sub);
     item.append(gameIcon(g), text);
     if (g.steam_cloud) {
@@ -275,7 +280,8 @@ function renderDetailSettings() {
 
   detailTitleEl.textContent = g.game;
   renderDetailIcon();
-  detailAppIdEl.textContent = `AppID ${g.app_id} · ${g.effective_mode}`;
+  detailAppIdEl.textContent =
+    `AppID ${g.app_id} · ${g.effective_mode}` + (g.local_saves === false ? " · no saves on this computer yet" : "");
   // Set by the CLI when this game's save locations can't be mapped between
   // this OS and another (see resolve::cross_os_gaps).
   detailWarningEl.textContent = g.cross_os_note ? `Cross-platform restore: ${g.cross_os_note}.` : "";

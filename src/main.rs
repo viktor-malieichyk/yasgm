@@ -1957,6 +1957,8 @@ fn config_cmd(args: &[String]) -> Result<()> {
                     "default_keep": store::DEFAULT_KEEP,
                     "in_manifest": ctx.merged_game(game.app_id).is_some(),
                     "steam_cloud": ctx.has_steam_cloud(game.app_id),
+                    // null when the save location isn't known.
+                    "local_saves": ctx.merged_game(game.app_id).map(|m| snapshot::has_local_saves(&m.files, game, ctx.os)),
                     "cross_os_note": ctx.merged_game(game.app_id).and_then(|m| cross_os_note(&m.files, ctx.os)),
                     "last_version": state.get(&ctx.account, game.app_id).map(|s| s.last_version.clone()),
                     "synced_at": state.get(&ctx.account, game.app_id).map(|s| s.synced_at),

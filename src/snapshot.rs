@@ -142,6 +142,12 @@ fn collect_entries(
     (entries, mounts)
 }
 
+/// Whether any save file for the game exists on this machine (what
+/// `capture` would pick up), without reading the files.
+pub fn has_local_saves(files: &HashMap<String, FileRule>, game: &InstalledGame, os: Os) -> bool {
+    !collect_entries(files, game, os).0.is_empty()
+}
+
 /// Capture a game's current save state into a zip in the staging dir.
 /// Returns None when no save files exist locally.
 pub fn capture(
