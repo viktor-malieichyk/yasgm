@@ -1085,24 +1085,6 @@ impl EventLog {
         }
     }
 
-    /// `run_sync` for the daemon: its events (or its failure) are logged.
-    fn sync(&mut self, only: Option<u64>) -> Result<()> {
-        // Disconnected on purpose: nothing to sync, and nothing to report.
-        if matches!(config::Config::load().provider, config::ProviderConfig::None) {
-            return Ok(());
-        }
-        match run_sync(only, false) {
-            Ok(events) => {
-                events.into_iter().for_each(|e| self.record(e));
-                Ok(())
-            }
-            Err(err) => {
-                self.record(SyncEvent { app_id: only, game: None, kind: "error", detail: format!("{err:#}") });
-                Err(err)
-            }
-        }
-    }
-
     /// `{"seq": latest, "events": [...]}` with the events after `since`;
     /// without `since`, just the latest number (a client's starting point).
     fn since(&self, since: Option<u64>) -> serde_json::Value {
@@ -1118,6 +1100,62 @@ impl EventLog {
             })
             .collect();
         serde_json::json!({"seq": self.seq, "events": events})
+    }
+}
+
+/// What the daemon is doing, shared with the control socket so `status`
+/// and `events` are answered at once — even while a sync holds up the
+/// watch loop (the Decky plugin shows "Syncing…" from it).
+#[derive(Default)]
+struct DaemonState {
+    log: EventLog,
+    paused: bool,
+    running_game: Option<u64>,
+    pending_sync: Vec<u64>,
+    watching_games: usize,
+    /// The sync in progress: `Some(Some(id))` one game, `Some(None)` all.
+    syncing: Option<Option<u64>>,
+}
+
+type SharedState = std::sync::Arc<std::sync::Mutex<DaemonState>>;
+
+fn lock_state(state: &SharedState) -> std::sync::MutexGuard<'_, DaemonState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl DaemonState {
+    fn status_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "paused": self.paused,
+            "running_game": self.running_game,
+            "pending_sync": self.pending_sync,
+            "watching_games": self.watching_games,
+            "syncing": self.syncing.is_some(),
+            "syncing_game": self.syncing.flatten(),
+        })
+    }
+}
+
+/// `run_sync` for the daemon: marked as in progress while it runs, then its
+/// events (or its failure) are logged.
+fn daemon_sync(state: &SharedState, only: Option<u64>) -> Result<()> {
+    // Disconnected on purpose: nothing to sync, and nothing to report.
+    if matches!(config::Config::load().provider, config::ProviderConfig::None) {
+        return Ok(());
+    }
+    lock_state(state).syncing = Some(only);
+    let result = run_sync(only, false);
+    let mut state = lock_state(state);
+    state.syncing = None;
+    match result {
+        Ok(events) => {
+            events.into_iter().for_each(|e| state.log.record(e));
+            Ok(())
+        }
+        Err(err) => {
+            state.log.record(SyncEvent { app_id: only, game: None, kind: "error", detail: format!("{err:#}") });
+            Err(err)
+        }
     }
 }
 
@@ -1219,37 +1257,37 @@ pub enum WatchCommand {
     /// done — the Decky plugin keeps the game paused until then.
     GameStarted(u64, Option<std::sync::mpsc::Sender<String>>),
     GameStopped(u64),
-    /// Reply with `EventLog::since` as JSON.
-    Events(Option<u64>, std::sync::mpsc::Sender<String>),
-    /// Reply with the daemon's state as one JSON line.
-    Status(std::sync::mpsc::Sender<String>),
     Quit,
 }
 
-/// Answers one control-socket request by forwarding it to the watch loop.
-fn remote_command(tx: &std::sync::mpsc::Sender<WatchCommand>, request: control::Request) -> String {
+/// Answers one control-socket request: `status` and `events` from the
+/// shared state, everything else by forwarding it to the watch loop.
+fn remote_command(
+    tx: &std::sync::mpsc::Sender<WatchCommand>,
+    state: &SharedState,
+    request: control::Request,
+) -> String {
     use control::Request;
-    // Requests answered by the loop itself; it checks commands at least
-    // every 2 s, but a sync in progress holds it up.
-    let ask = |make: &dyn Fn(std::sync::mpsc::Sender<String>) -> WatchCommand, wait_secs: u64| -> String {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if tx.send(make(reply_tx)).is_err() {
-            return "error: watch loop has stopped".into();
-        }
-        reply_rx
-            .recv_timeout(std::time::Duration::from_secs(wait_secs))
-            .unwrap_or_else(|_| "error: daemon is busy (syncing); try again".into())
-    };
     let command = match request {
-        // Waits for the pre-launch sync (see WatchCommand::GameStarted).
-        Request::GameStarted(id) => return ask(&|reply| WatchCommand::GameStarted(id, Some(reply)), 150),
-        Request::Events(since) => return ask(&|reply| WatchCommand::Events(since, reply), 8),
+        Request::Status => return lock_state(state).status_json().to_string(),
+        Request::Events(since) => return lock_state(state).log.since(since).to_string(),
+        // Waits for the pre-launch sync (see WatchCommand::GameStarted); the
+        // loop checks commands at least every 2 s, but a sync in progress
+        // holds it up.
+        Request::GameStarted(id) => {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            if tx.send(WatchCommand::GameStarted(id, Some(reply_tx))).is_err() {
+                return "error: watch loop has stopped".into();
+            }
+            return reply_rx
+                .recv_timeout(std::time::Duration::from_secs(150))
+                .unwrap_or_else(|_| "error: daemon is busy (syncing); try again".into());
+        }
         Request::GameStopped(id) => WatchCommand::GameStopped(id),
         Request::Sync(target) => WatchCommand::Sync(target),
         Request::Pause => WatchCommand::SetPaused(true),
         Request::Resume => WatchCommand::SetPaused(false),
         Request::Quit => WatchCommand::Quit,
-        Request::Status => return ask(&WatchCommand::Status, 8),
     };
     match tx.send(command) {
         Ok(()) => "ok".into(),
@@ -1425,14 +1463,15 @@ fn watch_loop(
     let ctx = load_ctx()?;
     let cfg = config::Config::load();
 
-    if let Err(err) = control::serve(move |request| remote_command(&control_tx, request)) {
+    let state = SharedState::default();
+    let control_state = state.clone();
+    if let Err(err) = control::serve(move |request| remote_command(&control_tx, &control_state, request)) {
         eprintln!("control socket unavailable (watch send won't reach this daemon): {err:#}");
     }
 
-    let mut log = EventLog::default();
     println!("initial sync pass…");
     report("initial sync…");
-    if let Err(err) = log.sync(None) {
+    if let Err(err) = daemon_sync(&state, None) {
         eprintln!("initial sync failed (will keep watching): {err:#}");
     }
 
@@ -1452,12 +1491,22 @@ fn watch_loop(
         settle.as_secs()
     );
     report(&format!("watching {n_games} games"));
+    lock_state(&state).watching_games = n_games;
 
     let mut dirty: HashMap<u64, Instant> = HashMap::new();
     let mut detector = running::RunningDetector::new();
     let mut session = GameSession::new(detector.poll(&ctx.root, &ctx.games));
     let mut last_rescan = Instant::now();
     let mut paused = false;
+    // The loop's view, for `status` over the control socket.
+    let publish = |dirty: &HashMap<u64, Instant>, paused: bool, running_game: Option<u64>| {
+        let mut pending: Vec<u64> = dirty.keys().copied().collect();
+        pending.sort();
+        let mut shared = lock_state(&state);
+        shared.paused = paused;
+        shared.running_game = running_game;
+        shared.pending_sync = pending;
+    };
 
     let handle_event = |event: notify::Result<notify::Event>,
                             dirty: &mut HashMap<u64, Instant>,
@@ -1503,7 +1552,7 @@ fn watch_loop(
                 }
                 WatchCommand::Sync(target) => {
                     report("syncing…");
-                    match log.sync(target) {
+                    match daemon_sync(&state, target) {
                         Ok(()) => report("synced (manual)"),
                         Err(err) => {
                             eprintln!("manual sync failed: {err:#}");
@@ -1525,7 +1574,7 @@ fn watch_loop(
                         // pull newer cloud saves before it reads them.
                         if !paused {
                             println!("Steam reports app {app_id} starting — syncing it first");
-                            if let Err(err) = log.sync(Some(app_id)) {
+                            if let Err(err) = daemon_sync(&state, Some(app_id)) {
                                 eprintln!("pre-launch sync of {app_id} failed: {err:#}");
                             }
                             dirty.remove(&app_id);
@@ -1543,33 +1592,18 @@ fn watch_loop(
                     println!("Steam reports app {app_id} stopped");
                     exits.extend(session.hint_stopped(app_id, Instant::now()));
                 }
-                WatchCommand::Events(since, reply) => {
-                    let _ = reply.send(log.since(since).to_string());
-                }
-                WatchCommand::Status(reply) => {
-                    let mut pending: Vec<u64> = dirty.keys().copied().collect();
-                    pending.sort();
-                    let _ = reply.send(
-                        serde_json::json!({
-                            "paused": paused,
-                            "running_game": session.active,
-                            "pending_sync": pending,
-                            "watching_games": n_games,
-                        })
-                        .to_string(),
-                    );
-                }
             }
         }
 
         exits.extend(session.update(detector.poll(&ctx.root, &ctx.games), Instant::now()));
         // Still "running" during the exit grace period, so settled saves wait too.
         let running_now = session.active;
+        publish(&dirty, paused, running_now);
         for prev in exits {
             if !paused {
                 println!("app {prev} exited — syncing");
                 report("game exited — syncing…");
-                match log.sync(Some(prev)) {
+                match daemon_sync(&state, Some(prev)) {
                     Ok(()) => report("synced after game exit"),
                     Err(err) => {
                         eprintln!("sync after exit of {prev} failed: {err:#}");
@@ -1591,7 +1625,7 @@ fn watch_loop(
             for app_id in settled {
                 println!("saves settled for app {app_id} — syncing");
                 report("saves changed — syncing…");
-                match log.sync(Some(app_id)) {
+                match daemon_sync(&state, Some(app_id)) {
                     Ok(()) => report("synced"),
                     Err(err) => {
                         eprintln!("sync of {app_id} failed: {err:#}");
@@ -1601,6 +1635,7 @@ fn watch_loop(
                 dirty.remove(&app_id);
             }
         }
+        publish(&dirty, paused, running_now);
 
         // Pick up save dirs that didn't exist at startup (first-ever save).
         if last_rescan.elapsed() >= RESCAN_EVERY {
@@ -2163,7 +2198,7 @@ fn selftest() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_run_args, EventLog, GameSession, SyncEvent, WatchRoot};
+    use super::{parse_run_args, DaemonState, EventLog, GameSession, SyncEvent, WatchRoot};
     use std::path::{Path, PathBuf};
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -2222,6 +2257,20 @@ mod tests {
         }
         assert_eq!(log.events.len(), EventLog::CAPACITY);
         assert_eq!(log.since(Some(0))["seq"], 152);
+    }
+
+    #[test]
+    fn status_reports_the_sync_in_progress() {
+        let mut state = DaemonState { watching_games: 3, ..Default::default() };
+        assert_eq!(state.status_json()["syncing"], false);
+        assert_eq!(state.status_json()["syncing_game"], serde_json::Value::Null);
+        state.syncing = Some(Some(42));
+        assert_eq!(state.status_json()["syncing"], true);
+        assert_eq!(state.status_json()["syncing_game"], 42);
+        state.syncing = Some(None);
+        assert_eq!(state.status_json()["syncing"], true, "a sync of every game");
+        assert_eq!(state.status_json()["syncing_game"], serde_json::Value::Null);
+        assert_eq!(state.status_json()["watching_games"], 3);
     }
 
     #[test]

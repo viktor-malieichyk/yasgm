@@ -356,23 +356,35 @@ repo, verified 2026-10-19:
 
 ### SteamOS: in-plugin self-update (sideloaded, D21)
 
-Since Decky only update-checks plugins against its store, the plugin
-updates itself:
+Since Decky only update-checks plugins against its store, the plugin checks
+GitHub itself. **Revised 2026-10-20 when implemented** (the original plan
+swapped plugin directories itself, which a non-root plugin can't do —
+`~/homebrew/plugins` belongs to root):
 
-- Release CI attaches `yasgm-decky.zip` + `yasgm-decky.zip.sha256` (and a
-  minisign `.sig`, reusing the D20 updater key) to each GitHub Release.
-- The plugin backend checks
-  `api.github.com/repos/viktor-malieichyk/yasgm/releases/latest` on load
-  and every 6 h (matching Decky's own cadence); compares to its
-  `package.json` version; the QAM panel shows "Update to vX.Y.Z".
-- On confirm: stop the daemon, download zip, verify sha256 **and**
-  signature, extract to a temp dir next to
-  `~/homebrew/plugins/YASGM`, atomically swap directories, then reload the
-  plugin (restart `plugin_loader` service — needs root; Decky plugin
-  backends run with the `root` flag or call Decky's own reload — pick
-  whichever works on real Decky, verify on the VM). Keep the previous dir
-  as `YASGM.bak` for rollback.
-- Never self-update mid-sync; never auto-apply without a click.
+- `.github/workflows/release-decky.yml`: pushing tag `v<version>` (must
+  equal `decky/package.json`'s version) builds `yasgm-decky-<ver>.zip` +
+  `.sha256` on ubuntu (rustup + zig + cargo-zigbuild, same
+  `scripts/package-decky.sh`) and attaches them to that tag's release
+  (created if missing; desktop bundles join it in step 7).
+- Backend `check_update`: `api.github.com/repos/viktor-malieichyk/yasgm/
+  releases` (not `/latest`, so desktop-only releases don't hide the plugin),
+  skips drafts/prereleases, takes the zip named `yasgm-decky-<ver>.zip`,
+  version from the file name. SHA-256 from GitHub's asset `digest`, else
+  the `.sha256` asset; a release without one is refused. Cached 6 h;
+  checked 60 s after load and every 12 h; a newer version is toasted once.
+- Install = **Decky Loader's own route** `utilities/install_plugin(url,
+  "YASGM", version, sha256, UPDATE=2)` via `window.DeckyBackend.call` from
+  the frontend. The loader (root) asks the user to confirm, downloads,
+  checks the hash, uninstalls the old copy, unzips, chowns and reloads —
+  our `_unload` stops the daemon cleanly first. Never automatic.
+- Rollback: About → "Reinstall <previous>" installs the newest older
+  release the same way (DOWNGRADE=3). No `.bak` dir.
+- Trust: HTTPS from GitHub + the hash in the same release — protects
+  integrity, not against a compromised GitHub account. A minisign
+  signature (the D20 key) was planned; dropped for now because Decky's
+  Python has no ed25519 without extra packages. Revisit before wider use.
+- Side effect: for a non-"dev" version the loader posts an install-count
+  ping to the Decky store URL; it fails harmlessly for an unlisted plugin.
 
 ## UI plan
 
@@ -1281,7 +1293,7 @@ and fast until the release is otherwise ready). Status is tracked inline.
      per connection, one reply line (`ok` / JSON / `error: …`). Client:
      `yasgm watch send game-started <id> | game-stopped <id> | sync [id] |
      pause | resume | quit | status` (`status` → `{paused, running_game,
-     pending_sync, watching_games}`). Headless and tray modes share one
+     pending_sync, watching_games, syncing, syncing_game}`). Headless and tray modes share one
      `WatchCommand` channel. Steam start/stop hints override process
      detection in `GameSession`: a hinted game is running until its stop
      hint, which syncs immediately (no grace), and its lingering processes
@@ -1316,7 +1328,7 @@ and fast until the release is otherwise ready). Status is tracked inline.
      then terminate/kill. Callables: `get_status` (status --json + watch
      send status), `get_games`, `get_versions`, `sync_now`, `set_paused`,
      `game_event` (→ `watch send game-started|game-stopped`), `restore`,
-     `set_pinned`, `set_mode`, `use_onedrive`, `start_sign_in` /
+     `set_pinned`, `set_mode`, `start_sign_in` /
      `cancel_sign_in` (streams `auth --device --json` lines to the
      frontend as `yasgm_auth` events). Daemon ignores start/stop hints
      for apps that aren't installed Steam games (non-Steam shortcuts).
@@ -1369,7 +1381,29 @@ and fast until the release is otherwise ready). Status is tracked inline.
      version — consider removing files that the previous synced version
      had and the downloaded one doesn't.
 5. **Decky self-update** (D21): release zip + sha256 + signature, in-plugin
-   update check/apply/rollback.
+   update check/apply/rollback. **CODE LANDED 2026-10-20** — see
+   [SteamOS self-update](#steamos-in-plugin-self-update-sideloaded-d21)
+   (no signature yet). Check logic tested against the live GitHub API (no
+   releases yet) and canned release lists (digest vs `.sha256`, prerelease
+   skipped, previous-version pick). Not yet run: the workflow (needs a tag
+   push) and the Decky install prompt on the VM.
+   **Plugin panel polish (2026-10-20):** status card at the top (green
+   active / blue syncing with spinner / yellow paused or not connected /
+   red daemon not running, plus last sync time), "Syncing…" on the game
+   row and game page, game icons (`yasgm icons --json --embed`, fetched once
+   per session), search field, "Only without Steam Cloud" switch (off by
+   default, localStorage), cloud icon on Steam-Cloud rows, About section
+   (version, Check for updates, Update/Reinstall previous). The panel polls
+   `get_daemon_state` every 2 s — a direct socket request, no process.
+   Daemon: `status` and `events` are now answered from a shared
+   `DaemonState` (mutex) instead of the watch loop, so they reply during a
+   sync (they used to time out with "busy"); `status` gained `syncing` and
+   `syncing_game`. Toasts: the backend emits one `yasgm_sync_events` batch
+   per poll and the frontend merges 3+ uploads/downloads into one toast
+   (no burst after the daemon's first pass). Desktop GUI got the same
+   search field. Dev fix: `build-sidecar.sh` replaces sidecar copies
+   instead of overwriting them — macOS SIGKILLs a binary rewritten in place
+   (cached code signature), seen as exit 137.
 6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see
    [Test environment](#test-environment-steamac-vm)), then real Deck
    hardware for what the VM can't cover (carry-over from Phase 2):

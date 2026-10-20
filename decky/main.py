@@ -11,8 +11,12 @@ import asyncio
 import json
 import os
 import platform
+import re
 import signal
+import ssl
 import stat
+import time
+import urllib.request
 
 import decky
 
@@ -21,6 +25,12 @@ DAEMON_LOG = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "daemon.log")
 # `yasgm watch` exits with this when another daemon already holds the lock
 # (e.g. one started from desktop mode); that one serves us just as well.
 ALREADY_RUNNING = 3
+
+# Self-update (D21): releases of this repo carrying a `yasgm-decky-<ver>.zip`.
+RELEASES_API = "https://api.github.com/repos/viktor-malieichyk/yasgm/releases?per_page=30"
+PLUGIN_ZIP = re.compile(r"^yasgm-decky-(.+)\.zip$")
+UPDATE_CACHE_SECS = 6 * 3600
+UPDATE_CHECK_EVERY = 12 * 3600
 
 
 def yasgm_path() -> str:
@@ -117,10 +127,99 @@ def signal_all(pids: list, sig) -> None:
             pass
 
 
+def plugin_version() -> str:
+    version = getattr(decky, "DECKY_PLUGIN_VERSION", None)
+    if not version:
+        with open(os.path.join(decky.DECKY_PLUGIN_DIR, "package.json")) as f:
+            version = json.load(f)["version"]
+    return str(version)
+
+
+def version_key(version: str) -> tuple:
+    """"v1.2.10" → (1, 2, 10); anything after a "-" (pre-release) sorts lower."""
+    core, _, pre = version.lstrip("v").partition("-")
+    parts = tuple(int(p) if p.isdigit() else 0 for p in core.split("."))
+    return parts + ((0,) if pre else (1,))
+
+
+def ssl_context() -> ssl.SSLContext:
+    """Decky's bundled Python may not find the system CA store by itself."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    for cafile in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ca-certificates/extracted/tls-ca-bundle.pem"):
+        if os.path.exists(cafile):
+            return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
+
+
+def http_get(url: str, accept: str = "application/vnd.github+json") -> bytes:
+    request = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "yasgm-decky"})
+    with urllib.request.urlopen(request, timeout=20, context=ssl_context()) as response:
+        return response.read()
+
+
+def plugin_releases() -> list:
+    """Published (non-draft, non-prerelease) releases with a plugin zip, newest
+    first: [{version, url, hash, notes, asset}]. `hash` is the zip's SHA-256
+    from GitHub's asset digest, else from the `.sha256` file next to it."""
+    found = []
+    for release in json.loads(http_get(RELEASES_API)):
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        assets = release.get("assets", [])
+        for asset in assets:
+            match = PLUGIN_ZIP.match(asset.get("name", ""))
+            if not match:
+                continue
+            found.append({
+                "version": match.group(1),
+                "url": asset["browser_download_url"],
+                "digest": asset.get("digest") or "",
+                "sums": next((a["browser_download_url"] for a in assets if a.get("name") == asset["name"] + ".sha256"), None),
+                "notes": (release.get("body") or "").strip(),
+            })
+            break
+    found.sort(key=lambda r: version_key(r["version"]), reverse=True)
+    return found
+
+
+def release_hash(release: dict) -> str:
+    if release["digest"].startswith("sha256:"):
+        return release["digest"][len("sha256:"):]
+    if release["sums"]:
+        text = http_get(release["sums"], accept="application/octet-stream").decode(errors="replace")
+        value = text.split()[0] if text.split() else ""
+        if re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            return value.lower()
+    raise RuntimeError(f"release {release['version']} has no SHA-256 for its plugin zip")
+
+
+def update_info() -> dict:
+    """What the panel needs: the newest release (if newer than this plugin)
+    and the newest older one (to roll back to), each with url + hash."""
+    current = plugin_version()
+    releases = plugin_releases()
+    newer = [r for r in releases if version_key(r["version"]) > version_key(current)]
+    older = [r for r in releases if version_key(r["version"]) < version_key(current)]
+    pick = lambda r: r and {"version": r["version"], "url": r["url"], "hash": release_hash(r), "notes": r["notes"][:600]}
+    return {
+        "current": current,
+        "update": pick(newer[0] if newer else None),
+        "previous": pick(older[0] if older else None),
+        "checked_at": int(time.time()),
+    }
+
+
 class Plugin:
     daemon = None  # asyncio.subprocess.Process of our `yasgm watch` child
     stopping = False
     sign_in = None  # running `yasgm auth --device --json`
+    updates = None  # last update_info()
+    announced = None  # update version already toasted
 
     # ---- daemon lifecycle -------------------------------------------------
 
@@ -129,10 +228,26 @@ class Plugin:
         self.loop = asyncio.get_event_loop()
         self.loop.create_task(self._supervise_daemon())
         self.loop.create_task(self._relay_sync_events())
+        self.loop.create_task(self._watch_for_updates())
+
+    async def _watch_for_updates(self):
+        """Checks GitHub for a newer plugin release shortly after start and
+        then twice a day; a new one is announced once (`yasgm_update`)."""
+        await asyncio.sleep(60)
+        while not self.stopping:
+            try:
+                info = await self.check_update(True)
+                update = info.get("update")
+                if update and update["version"] != self.announced:
+                    self.announced = update["version"]
+                    await decky.emit("yasgm_update", update)
+            except Exception as err:
+                decky.logger.info(f"update check failed: {err}")
+            await asyncio.sleep(UPDATE_CHECK_EVERY)
 
     async def _relay_sync_events(self):
-        """Polls the daemon's event log and emits each new sync event to the
-        frontend (`yasgm_sync_event`), which shows it as a toast."""
+        """Polls the daemon's event log and emits new sync events to the
+        frontend (`yasgm_sync_events`, a list), which shows them as toasts."""
         since = None
         while not self.stopping:
             await asyncio.sleep(5)
@@ -144,9 +259,10 @@ class Plugin:
             if since is not None and seq < since:
                 since = None  # daemon restarted: start over from its count
                 continue
-            if since is not None:
-                for event in reply.get("events", []):
-                    await decky.emit("yasgm_sync_event", event)
+            if since is not None and reply.get("events"):
+                # One batch per poll, so the frontend can merge a burst (e.g.
+                # the daemon's first pass) into a single toast.
+                await decky.emit("yasgm_sync_events", reply["events"])
             since = seq
 
     async def _supervise_daemon(self):
@@ -209,8 +325,31 @@ class Plugin:
                 status["watch_error"] = str(err)
         return status
 
+    async def get_daemon_state(self) -> dict:
+        """The daemon's live state straight from its socket — cheap enough to
+        poll every couple of seconds: {running, paused, syncing, syncing_game,
+        running_game, pending_sync, watching_games} or {running: False}."""
+        try:
+            state = json.loads(await ask_daemon("status", timeout=3))
+        except Exception as err:
+            return {"running": False, "error": str(err), "starting": self.daemon is not None}
+        state["running"] = True
+        return state
+
     async def get_games(self) -> list:
         return await run_json("games", "--json")
+
+    async def get_icons(self) -> dict:
+        """appid → data: URL of the game's icon (Steam's cache, else
+        downloaded once into yasgm's cache)."""
+        icons = await run_json("icons", "--json", "--embed", timeout=90)
+        return {str(i["app_id"]): i["data_url"] for i in icons if i.get("data_url")}
+
+    async def check_update(self, force: bool = False) -> dict:
+        """Newest plugin release on GitHub vs. this one (cached 6 h)."""
+        if force or not self.updates or time.time() - self.updates["checked_at"] > UPDATE_CACHE_SECS:
+            self.updates = await asyncio.to_thread(update_info)
+        return self.updates
 
     async def get_versions(self, app_id: int) -> list:
         return await run_json("versions", str(app_id), "--json")

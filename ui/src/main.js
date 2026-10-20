@@ -44,12 +44,16 @@ let games = [];
 let selectedAppId = null;
 // Sidebar filter: hide games Steam Cloud already syncs.
 let onlyNoCloud = false;
+// Sidebar search text, lowercased.
+let searchQuery = "";
 
 const CLOUD_ICON =
   '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 15.5a3.8 3.8 0 0 1-.4-7.58A5 5 0 0 1 15 7a3.6 3.6 0 0 1 .3 8.5H6z" /></svg>';
 
 function visibleGames() {
-  return onlyNoCloud ? games.filter((g) => !g.steam_cloud) : games;
+  return games.filter(
+    (g) => !(onlyNoCloud && g.steam_cloud) && (!searchQuery || g.game.toLowerCase().includes(searchQuery)),
+  );
 }
 // appid → data: URL of the game's icon (see loadIcons).
 let icons = {};
@@ -201,10 +205,10 @@ function gameIcon(g, large = false) {
 
 function renderGamesList() {
   gamesListEl.innerHTML = "";
-  if (onlyNoCloud && visibleGames().length === 0 && games.length > 0) {
+  if (visibleGames().length === 0 && games.length > 0) {
     const empty = document.createElement("p");
     empty.className = "muted list-empty";
-    empty.textContent = "Every installed game uses Steam Cloud.";
+    empty.textContent = searchQuery ? "No games match your search." : "Every installed game uses Steam Cloud.";
     gamesListEl.appendChild(empty);
   }
   for (const g of visibleGames()) {
@@ -850,6 +854,12 @@ window.addEventListener("DOMContentLoaded", () => {
   const noCloudToggle = document.querySelector("#filter-no-cloud");
   noCloudToggle.checked = onlyNoCloud;
   noCloudToggle.addEventListener("change", () => setOnlyNoCloud(noCloudToggle.checked));
+  // Filters the list only; the selected game stays open.
+  const searchEl = document.querySelector("#game-search");
+  searchEl.addEventListener("input", () => {
+    searchQuery = searchEl.value.trim().toLowerCase();
+    renderGamesList();
+  });
 
   loadTheme();
   loadAccentColor();

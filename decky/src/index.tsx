@@ -9,14 +9,15 @@ import {
   PanelSection,
   PanelSectionRow,
   Spinner,
+  TextField,
   ToggleField,
   showModal,
   staticClasses,
   useParams,
 } from "@decky/ui";
 import { addEventListener, callable, definePlugin, removeEventListener, routerHook, toaster } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
-import { FaCloudUploadAlt } from "react-icons/fa";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FaCloud, FaCloudUploadAlt } from "react-icons/fa";
 import qrcode from "qrcode-generator";
 
 // ---- backend (main.py) ------------------------------------------------------
@@ -29,8 +30,36 @@ interface Status {
   detail: string | null;
   error: string | null;
   daemon: { running: boolean; pid: number | null };
-  watch?: { paused: boolean; running_game: number | null; pending_sync: number[]; watching_games: number };
-  watch_error?: string;
+}
+
+/** The daemon's live state over its socket (`get_daemon_state`, polled). */
+interface DaemonState {
+  running: boolean;
+  /** Not reachable, but the plugin has started it (coming up). */
+  starting?: boolean;
+  error?: string;
+  paused?: boolean;
+  syncing?: boolean;
+  /** The game being synced; null while syncing every game. */
+  syncing_game?: number | null;
+  running_game?: number | null;
+  pending_sync?: number[];
+  watching_games?: number;
+}
+
+/** A plugin release on GitHub (`check_update`). */
+interface Release {
+  version: string;
+  url: string;
+  hash: string;
+  notes: string;
+}
+
+interface UpdateInfo {
+  current: string;
+  update: Release | null;
+  previous: Release | null;
+  checked_at: number;
 }
 
 /** One row of `yasgm games --json`. */
@@ -40,6 +69,7 @@ interface Game {
   mode: string;
   effective_mode: string;
   in_manifest: boolean;
+  steam_cloud: boolean;
   cross_os_note: string | null;
   last_version: string | null;
   synced_at: number | null;
@@ -79,7 +109,10 @@ type AuthEvent =
   | { event: "error"; message: string };
 
 const getStatus = callable<[], Status>("get_status");
+const getDaemonState = callable<[], DaemonState>("get_daemon_state");
 const getGames = callable<[], Game[]>("get_games");
+const getIcons = callable<[], Record<string, string>>("get_icons");
+const checkUpdate = callable<[force: boolean], UpdateInfo>("check_update");
 const getVersions = callable<[appId: number], Version[]>("get_versions");
 const syncNow = callable<[appId: number], string>("sync_now");
 const setPaused = callable<[paused: boolean], string>("set_paused");
@@ -93,6 +126,22 @@ const startSignIn = callable<[], void>("start_sign_in");
 const cancelSignIn = callable<[], void>("cancel_sign_in");
 
 const KEEP_CHOICES = [3, 5, 10, 20, 50];
+
+// Decky Loader's own installer (its `utilities/install_plugin` route): it
+// asks the user to confirm, downloads the zip, checks the SHA-256, replaces
+// this plugin and reloads it — the plugin itself can't write its folder.
+declare global {
+  interface Window {
+    DeckyBackend: { call<Args extends unknown[], R = void>(route: string, ...args: Args): Promise<R> };
+  }
+}
+const PLUGIN_NAME = "YASGM"; // plugin.json "name": the install Decky replaces
+const INSTALL_UPDATE = 2;
+const INSTALL_DOWNGRADE = 3;
+
+function installRelease(release: Release, type: number) {
+  return window.DeckyBackend.call("utilities/install_plugin", release.url, PLUGIN_NAME, release.version, release.hash, type);
+}
 
 /** Toast text for a sync event from the daemon. */
 function eventToast(e: SyncEvent): string {
@@ -111,6 +160,24 @@ function eventToast(e: SyncEvent): string {
     case "error":
       return `Sync failed: ${e.detail.length > 140 ? e.detail.slice(0, 140) + "…" : e.detail}`;
   }
+}
+
+/** Toasts for one batch of daemon events; a burst of uploads or downloads
+ *  (the daemon's first pass, Sync now) becomes a single toast. */
+function toastEvents(events: SyncEvent[]) {
+  const bursts: Record<string, SyncEvent[]> = {};
+  const single: SyncEvent[] = [];
+  for (const e of events) {
+    if ((e.kind === "uploaded" && e.detail !== "offline") || e.kind === "downloaded") (bursts[e.kind] ??= []).push(e);
+    else single.push(e);
+  }
+  for (const [kind, list] of Object.entries(bursts)) {
+    if (list.length > 2) {
+      const what = kind === "uploaded" ? "Saves backed up" : "Newer saves restored";
+      toaster.toast({ title: "YASGM", body: `${what} — ${list.length} games` });
+    } else single.push(...list);
+  }
+  for (const e of single) toaster.toast({ title: "YASGM", body: eventToast(e) });
 }
 
 const MODES = [
@@ -151,6 +218,150 @@ function shortMode(g: Game) {
 }
 
 const muted = { fontSize: "12px", color: "#8b929a" };
+
+const NO_CLOUD_KEY = "yasgm-only-no-steam-cloud";
+
+function loadOnlyNoCloud() {
+  try {
+    return localStorage.getItem(NO_CLOUD_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+// Icons rarely change: fetched once per session, shared by every view.
+let iconCache: Record<string, string> = {};
+let iconLoad: Promise<void> | null = null;
+
+function useIcons() {
+  const [icons, setIcons] = useState(iconCache);
+  useEffect(() => {
+    iconLoad ??= getIcons()
+      .then((found) => {
+        iconCache = found;
+      })
+      .catch(() => {
+        iconLoad = null; // try again next time
+      });
+    iconLoad.then(() => setIcons(iconCache));
+  }, []);
+  return icons;
+}
+
+function GameIcon({ game, icons, size = 28 }: { game: Game; icons: Record<string, string>; size?: number }) {
+  const url = icons[String(game.app_id)];
+  const box = { width: size, height: size, borderRadius: 4, flexShrink: 0 } as const;
+  if (url) return <img src={url} style={box} />;
+  const letter = (game.game.match(/[\p{L}\p{N}]/u) ?? ["?"])[0].toUpperCase();
+  return (
+    <div
+      style={{
+        ...box,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontWeight: 700,
+        fontSize: size * 0.5,
+        background: `hsl(${(game.app_id * 47) % 360} 45% 35%)`,
+      }}
+    >
+      {letter}
+    </div>
+  );
+}
+
+/** Polls the daemon's live state every 2 s while mounted; `onSyncDone` runs
+ *  when a sync finishes (to re-read last-synced times and versions). */
+function useDaemonState(onSyncDone?: () => void) {
+  const [state, setState] = useState<DaemonState | null>(null);
+  const done = useRef(onSyncDone);
+  done.current = onSyncDone;
+  useEffect(() => {
+    let alive = true;
+    let wasSyncing = false;
+    const tick = async () => {
+      try {
+        const next = await getDaemonState();
+        if (!alive) return;
+        setState(next);
+        if (wasSyncing && !next.syncing) done.current?.();
+        wasSyncing = !!next.syncing;
+      } catch {}
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+  return state;
+}
+
+const TONES = { ok: "#59bf40", busy: "#1a9fff", warn: "#e8b45f", bad: "#ff6b6b" };
+
+/** The big "is it working?" card at the top of the panel. */
+function StatusCard({ status, daemon, games }: { status: Status | null; daemon: DaemonState | null; games: Game[] | null }) {
+  const name = (id: number | null | undefined) => games?.find((g) => g.app_id === id)?.game ?? "a game";
+  const lastSync = Math.max(0, ...(games ?? []).map((g) => g.synced_at ?? 0));
+  const notConnected = status && (status.provider.type === "none" || (status.provider.type === "onedrive" && !status.signed_in));
+
+  let tone: keyof typeof TONES, title: string, detail: string;
+  let spinning = false;
+  if (!daemon) {
+    [tone, title, detail, spinning] = ["busy", "Checking…", "", true];
+  } else if (!daemon.running) {
+    tone = "bad";
+    title = "Sync is not running";
+    detail = daemon.starting ? "Starting…" : "Restarting automatically. If this stays, see ~/homebrew/logs/yasgm/daemon.log";
+  } else if (notConnected) {
+    [tone, title, detail] = ["warn", "Not connected", "Your saves aren't backed up. Sign in below."];
+  } else if (status && !status.ok) {
+    [tone, title, detail] = ["warn", "Cloud unreachable", status.error ?? "Saves are kept here and uploaded later."];
+  } else if (daemon.syncing) {
+    tone = "busy";
+    title = daemon.syncing_game ? `Syncing ${name(daemon.syncing_game)}…` : "Syncing all games…";
+    detail = "Uploading or downloading saves";
+    spinning = true;
+  } else if (daemon.paused) {
+    [tone, title, detail] = ["warn", "Paused", "Saves aren't synced until you resume."];
+  } else if (daemon.running_game) {
+    [tone, title, detail] = ["ok", `Playing ${name(daemon.running_game)}`, "Its saves sync when you quit."];
+  } else {
+    tone = "ok";
+    title = "Sync is active";
+    const pending = daemon.pending_sync?.length ?? 0;
+    detail = pending
+      ? `Waiting to sync ${pending} game${pending > 1 ? "s" : ""}`
+      : `Watching ${daemon.watching_games ?? 0} games` + (lastSync ? ` · last sync ${timeAgo(lastSync)}` : "");
+  }
+
+  const color = TONES[tone];
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "10px 12px",
+        margin: "4px 0 8px",
+        borderRadius: 6,
+        background: `${color}22`,
+        borderLeft: `4px solid ${color}`,
+      }}
+    >
+      {spinning ? (
+        <Spinner style={{ width: 18, height: 18, flexShrink: 0 }} />
+      ) : (
+        <div style={{ width: 12, height: 12, borderRadius: 6, flexShrink: 0, background: color, boxShadow: `0 0 8px ${color}` }} />
+      )}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 700, fontSize: "15px", color }}>{title}</div>
+        {detail && <div style={{ ...muted, overflowWrap: "anywhere" }}>{detail}</div>}
+      </div>
+    </div>
+  );
+}
 
 // ---- sign-in ------------------------------------------------------------------
 
@@ -223,6 +434,16 @@ function Content() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  const [query, setQuery] = useState("");
+  const [onlyNoCloud, setOnlyNoCloud] = useState(loadOnlyNoCloud);
+  const [updates, setUpdates] = useState<UpdateInfo | null>(null);
+  const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const icons = useIcons();
+
+  const refreshGames = useCallback(() => {
+    getGames().then(setGames).catch(() => {});
+  }, []);
+  const daemon = useDaemonState(refreshGames);
 
   const refresh = useCallback(async () => {
     try {
@@ -237,6 +458,9 @@ function Content() {
 
   useEffect(() => {
     refresh();
+    checkUpdate(false)
+      .then(setUpdates)
+      .catch(() => {});
   }, []);
 
   const act = async (action: () => Promise<unknown>, done?: string) => {
@@ -252,72 +476,90 @@ function Content() {
     }
   };
 
-  const paused = status?.watch?.paused ?? false;
+  const checkNow = async () => {
+    setUpdateNote("Checking…");
+    try {
+      const info = await checkUpdate(true);
+      setUpdates(info);
+      setUpdateNote(info.update ? null : "You have the latest version");
+    } catch (err) {
+      setUpdateNote(`Couldn't check: ${errorText(err)}`);
+    }
+  };
+
+  const toggleOnlyNoCloud = (value: boolean) => {
+    setOnlyNoCloud(value);
+    try {
+      localStorage.setItem(NO_CLOUD_KEY, value ? "1" : "0");
+    } catch {}
+  };
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (games ?? []).filter((g) => !(onlyNoCloud && g.steam_cloud) && (!q || g.game.toLowerCase().includes(q)));
+  }, [games, query, onlyNoCloud]);
+
+  const running = !!daemon?.running;
+  const paused = daemon?.paused ?? false;
   // One provider at a time, and signing in is choosing it: no provider
   // switch. Disconnected (or signed out of OneDrive) → QR sign-in; connected
   // → Disconnect.
   const needsSignIn = status?.provider.type === "none" || (status?.provider.type === "onedrive" && !status.signed_in);
   const connected = !!status && !needsSignIn;
   const providerLabel = status?.provider.type === "local" ? `Folder: ${status.provider.path}` : "OneDrive";
+  const update = updates?.update;
 
   return (
     <>
       <PanelSection title="Status">
-        {!status && !error && (
-          <PanelSectionRow>
-            <Spinner style={{ width: 24 }} />
-          </PanelSectionRow>
-        )}
+        <PanelSectionRow>
+          <StatusCard status={status} daemon={daemon} games={games} />
+        </PanelSectionRow>
         {error && (
           <PanelSectionRow>
             <Field label="Something went wrong" description={error} />
           </PanelSectionRow>
         )}
-        {status && (
-          <>
-            <PanelSectionRow>
-              <Field
-                label={providerLabel}
-                description={
-                  status.provider.type === "none"
-                    ? "Not connected — your saves aren't being backed up"
-                    : needsSignIn
-                      ? "Signed out"
-                      : status.ok
-                        ? "Connected"
-                        : status.error ?? "Not working right now"
-                }
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <Field
-                label="Sync daemon"
-                description={
-                  !status.daemon.running
-                    ? "Not running"
-                    : paused
-                      ? "Paused"
-                      : status.watch?.pending_sync.length
-                        ? `Waiting to sync ${status.watch.pending_sync.length} game(s)`
-                        : `Watching ${status.watch?.watching_games ?? 0} games`
-                }
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" disabled={busy || !status.daemon.running} onClick={() => act(() => syncNow(0), "Sync started")}>
-                Sync now
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ToggleField
-                label="Pause syncing"
-                checked={paused}
-                disabled={busy || !status.daemon.running}
-                onChange={(value) => act(() => setPaused(value))}
-              />
-            </PanelSectionRow>
-          </>
+        {update && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" description={`You have ${updates?.current}`} onClick={() => installRelease(update, INSTALL_UPDATE)}>
+              Update to {update.version}
+            </ButtonItem>
+          </PanelSectionRow>
         )}
+        {status && (
+          <PanelSectionRow>
+            <Field
+              label={providerLabel}
+              description={
+                status.provider.type === "none"
+                  ? "Not connected"
+                  : needsSignIn
+                    ? "Signed out"
+                    : status.ok
+                      ? "Connected"
+                      : status.error ?? "Not working right now"
+              }
+            />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={busy || !running || !!daemon?.syncing}
+            onClick={() => act(() => syncNow(0))}
+          >
+            {daemon?.syncing ? "Syncing…" : "Sync now"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Pause syncing"
+            checked={paused}
+            disabled={busy || !running}
+            onChange={(value) => act(() => setPaused(value))}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       {needsSignIn && (
@@ -346,6 +588,64 @@ function Content() {
         </PanelSection>
       )}
 
+      <PanelSection title="Games">
+        <PanelSectionRow>
+          <TextField
+            placeholder="Search games"
+            value={query}
+            bShowClearAction
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField label="Only without Steam Cloud" checked={onlyNoCloud} onChange={toggleOnlyNoCloud} />
+        </PanelSectionRow>
+        {!games && !error && (
+          <PanelSectionRow>
+            <Spinner style={{ width: 24 }} />
+          </PanelSectionRow>
+        )}
+        {games?.length === 0 && (
+          <PanelSectionRow>
+            <Field label="No installed games found" />
+          </PanelSectionRow>
+        )}
+        {!!games?.length && shown.length === 0 && (
+          <PanelSectionRow>
+            <Field label={query.trim() ? "No games match your search" : "Every installed game uses Steam Cloud"} />
+          </PanelSectionRow>
+        )}
+        {shown.map((g) => {
+          const syncingThis = daemon?.syncing && (daemon.syncing_game === g.app_id || daemon.syncing_game == null);
+          return (
+            <PanelSectionRow key={g.app_id}>
+              <ButtonItem
+                layout="below"
+                description={
+                  syncingThis ? "Syncing…" : g.synced_at ? `${shortMode(g)} · synced ${timeAgo(g.synced_at)}` : shortMode(g)
+                }
+                onClick={() => {
+                  Navigation.Navigate(`/yasgm/game/${g.app_id}`);
+                  Navigation.CloseSideMenus();
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left" }}>
+                  <GameIcon game={g} icons={icons} />
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {g.game}
+                  </span>
+                  {syncingThis ? (
+                    <Spinner style={{ width: 16, height: 16, flexShrink: 0 }} />
+                  ) : (
+                    g.steam_cloud && <FaCloud title="Steam Cloud already syncs this game" style={{ flexShrink: 0, opacity: 0.6 }} />
+                  )}
+                </div>
+              </ButtonItem>
+            </PanelSectionRow>
+          );
+        })}
+      </PanelSection>
+
       {connected && (
         <PanelSection title="Cloud">
           <PanelSectionRow>
@@ -373,28 +673,26 @@ function Content() {
         </PanelSection>
       )}
 
-      <PanelSection title="Games">
-        {games?.length === 0 && (
+      <PanelSection title="About">
+        <PanelSectionRow>
+          <Field label="Version">{updates?.current ?? "…"}</Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" description={updateNote ?? undefined} onClick={checkNow}>
+            Check for updates
+          </ButtonItem>
+        </PanelSectionRow>
+        {updates?.previous && (
           <PanelSectionRow>
-            <Field label="No installed games found" />
-          </PanelSectionRow>
-        )}
-        {games?.map((g) => (
-          <PanelSectionRow key={g.app_id}>
             <ButtonItem
               layout="below"
-              description={
-                g.synced_at ? `${shortMode(g)} · synced ${timeAgo(g.synced_at)}` : shortMode(g)
-              }
-              onClick={() => {
-                Navigation.Navigate(`/yasgm/game/${g.app_id}`);
-                Navigation.CloseSideMenus();
-              }}
+              description="Go back if this version misbehaves"
+              onClick={() => installRelease(updates.previous!, INSTALL_DOWNGRADE)}
             >
-              {g.game}
+              Reinstall {updates.previous.version}
             </ButtonItem>
           </PanelSectionRow>
-        ))}
+        )}
       </PanelSection>
     </>
   );
@@ -409,6 +707,7 @@ function GamePage() {
   const [versions, setVersions] = useState<Version[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const icons = useIcons();
 
   const load = useCallback(async () => {
     try {
@@ -425,6 +724,9 @@ function GamePage() {
   useEffect(() => {
     load();
   }, [id]);
+  // A finished sync may have added a version.
+  const daemon = useDaemonState(load);
+  const syncingThis = !!daemon?.syncing && (daemon.syncing_game === id || daemon.syncing_game == null);
 
   const act = async (action: () => Promise<string>) => {
     setBusy(true);
@@ -451,8 +753,23 @@ function GamePage() {
 
   return (
     <div style={{ marginTop: 40, padding: "16px 24px", height: "calc(100% - 40px)", overflowY: "auto" }}>
-      <h2 style={{ margin: "0 0 4px" }}>{game?.game ?? `App ${appId}`}</h2>
-      {game && <div style={muted}>{game.effective_mode}</div>}
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {game && <GameIcon game={game} icons={icons} size={40} />}
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ margin: "0 0 4px" }}>{game?.game ?? `App ${appId}`}</h2>
+          {game && (
+            <div style={muted}>
+              {game.effective_mode}
+              {game.steam_cloud && " · Steam Cloud already syncs this game"}
+            </div>
+          )}
+        </div>
+        {syncingThis && (
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, color: TONES.busy }}>
+            <Spinner style={{ width: 18, height: 18 }} /> Syncing…
+          </div>
+        )}
+      </div>
       {game?.cross_os_note && (
         <div style={{ ...muted, color: "#e8b45f", margin: "8px 0" }}>Cross-platform restore: {game.cross_os_note}.</div>
       )}
@@ -481,8 +798,8 @@ function GamePage() {
               onChange={(option) => act(() => setKeep(id, option.data))}
             />
           </div>
-          <DialogButton style={{ width: 200, alignSelf: "center" }} disabled={busy} onClick={() => act(() => syncNow(id))}>
-            Sync this game
+          <DialogButton style={{ width: 200, alignSelf: "center" }} disabled={busy || syncingThis} onClick={() => act(() => syncNow(id))}>
+            {syncingThis ? "Syncing…" : "Sync this game"}
           </DialogButton>
         </Focusable>
       )}
@@ -532,8 +849,9 @@ export default definePlugin(() => {
   });
 
   // The daemon's sync results (relayed by the backend) as toasts.
-  const syncEvents = addEventListener<[SyncEvent]>("yasgm_sync_event", (e) => {
-    toaster.toast({ title: "YASGM", body: eventToast(e) });
+  const syncEvents = addEventListener<[SyncEvent[]]>("yasgm_sync_events", toastEvents);
+  const updateFound = addEventListener<[Release]>("yasgm_update", (release) => {
+    toaster.toast({ title: "YASGM update available", body: `Version ${release.version} — install it from the YASGM panel` });
   });
 
   return {
@@ -543,7 +861,8 @@ export default definePlugin(() => {
     icon: <FaCloudUploadAlt />,
     onDismount() {
       lifetime.unregister();
-      removeEventListener("yasgm_sync_event", syncEvents);
+      removeEventListener("yasgm_sync_events", syncEvents);
+      removeEventListener("yasgm_update", updateFound);
       routerHook.removeRoute("/yasgm/game/:appId");
     },
   };

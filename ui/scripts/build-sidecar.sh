@@ -35,6 +35,9 @@ mkdir -p "$dest_dir"
 dest="$dest_dir/yasgm-$triple"
 [[ "$exe_name" == *.exe ]] && dest="$dest.exe"
 
+# Replace, don't overwrite in place: macOS caches a binary's code signature
+# by inode, and a rewritten one gets killed on launch (SIGKILL, exit 137).
+rm -f "$dest"
 cp "$built" "$dest"
 chmod +x "$dest"
 echo "sidecar ready: $dest"
@@ -44,5 +47,6 @@ echo "sidecar ready: $dest"
 # copy. Refresh it here (host target only).
 dev_copy="$repo_root/ui/src-tauri/target/debug/$exe_name"
 if [[ "$triple" == "$host" && -f "$dev_copy" ]]; then
+  rm -f "$dev_copy"
   cp "$built" "$dev_copy"
 fi
