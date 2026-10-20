@@ -733,14 +733,33 @@ fn pending_location_cmd(args: &[String]) -> Result<()> {
 fn sync_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
-    run_sync(only, dry_run)
+    run_sync(only, dry_run).map(drop)
 }
 
-fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
+/// Something from a sync run worth telling the user about (the daemon keeps
+/// these in its `EventLog`; the Decky plugin turns them into toasts).
+#[derive(Debug, Clone)]
+pub struct SyncEvent {
+    pub app_id: Option<u64>,
+    pub game: Option<String>,
+    /// `uploaded` | `downloaded` | `conflict` | `cloud_ahead` |
+    /// `quota_exceeded` | `error`
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+impl SyncEvent {
+    fn for_game(game: &steam::InstalledGame, kind: &'static str, detail: String) -> SyncEvent {
+        SyncEvent { app_id: Some(game.app_id), game: Some(game.name.clone()), kind, detail }
+    }
+}
+
+fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
     let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
     let cfg = config::Config::load();
     let mut state = config::State::load();
+    let mut events = Vec::new();
 
     for game in ctx.games.iter().filter(|g| only.is_none_or(|id| id == g.app_id)) {
         let Some(merged) = ctx.merged_game(game.app_id) else {
@@ -780,6 +799,7 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
                      where this left off.",
                     game.name
                 );
+                events.push(SyncEvent::for_game(game, "quota_exceeded", "OneDrive is out of storage space".into()));
                 break;
             }
             Err(e) => return Err(e),
@@ -792,7 +812,8 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
             sync::Outcome::InSync => println!("{}: in sync", game.name),
             sync::Outcome::Uploaded(v) => {
                 let verb = if v.pending { "backed up locally (pending — offline)" } else { "uploaded" };
-                println!("{}: {verb} version {} ({} files, {})", game.name, v.id, v.files, human_bytes(v.size))
+                println!("{}: {verb} version {} ({} files, {})", game.name, v.id, v.files, human_bytes(v.size));
+                events.push(SyncEvent::for_game(game, "uploaded", if v.pending { "offline".into() } else { v.id.clone() }));
             }
             sync::Outcome::Downloaded { version, files_written, local_preserved_as } => {
                 if let Some(preserved) = local_preserved_as {
@@ -802,19 +823,24 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
                     "{}: downloaded version {} ({files_written} files restored)",
                     game.name, version.id
                 );
+                events.push(SyncEvent::for_game(game, "downloaded", version.machine.clone()));
             }
-            sync::Outcome::CloudAhead(v) => println!(
-                "{}: cloud has newer version {} — backup-only mode, restore manually with \
-                 `yasgm restore {} --version {}`",
-                game.name, v.id, game.app_id, v.id
-            ),
+            sync::Outcome::CloudAhead(v) => {
+                println!(
+                    "{}: cloud has newer version {} — backup-only mode, restore manually with \
+                     `yasgm restore {} --version {}`",
+                    game.name, v.id, game.app_id, v.id
+                );
+                events.push(SyncEvent::for_game(game, "cloud_ahead", v.machine.clone()));
+            }
             sync::Outcome::Conflict { uploaded, pinned } => {
                 let verb = if uploaded.pending { "saved locally (pending — offline) as" } else { "uploaded as" };
                 println!(
                     "{}: CONFLICT — local {verb} active version {}; previous cloud head pinned \
                      as {} (kept until you delete it: `yasgm rm {} {}`)",
                     game.name, uploaded.id, pinned, game.app_id, pinned
-                )
+                );
+                events.push(SyncEvent::for_game(game, "conflict", pinned));
             }
             sync::Outcome::DryRun(what) => println!("{}: {what}", game.name),
         }
@@ -826,7 +852,7 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<()> {
     if !dry_run {
         state.save()?;
     }
-    Ok(())
+    Ok(events)
 }
 
 // ---- run (launch wrapper) --------------------------------------------------
@@ -978,6 +1004,60 @@ impl GameSession {
     }
 }
 
+/// The daemon's recent sync events, numbered, for `watch send events
+/// <since>` (the Decky plugin polls it for toasts). Keeps the last 100.
+#[derive(Default)]
+struct EventLog {
+    seq: u64,
+    events: std::collections::VecDeque<(u64, u64, SyncEvent)>,
+}
+
+impl EventLog {
+    const CAPACITY: usize = 100;
+
+    fn record(&mut self, event: SyncEvent) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.seq += 1;
+        self.events.push_back((self.seq, at, event));
+        while self.events.len() > Self::CAPACITY {
+            self.events.pop_front();
+        }
+    }
+
+    /// `run_sync` for the daemon: its events (or its failure) are logged.
+    fn sync(&mut self, only: Option<u64>) -> Result<()> {
+        match run_sync(only, false) {
+            Ok(events) => {
+                events.into_iter().for_each(|e| self.record(e));
+                Ok(())
+            }
+            Err(err) => {
+                self.record(SyncEvent { app_id: only, game: None, kind: "error", detail: format!("{err:#}") });
+                Err(err)
+            }
+        }
+    }
+
+    /// `{"seq": latest, "events": [...]}` with the events after `since`;
+    /// without `since`, just the latest number (a client's starting point).
+    fn since(&self, since: Option<u64>) -> serde_json::Value {
+        let since = since.unwrap_or(self.seq);
+        let events: Vec<_> = self
+            .events
+            .iter()
+            .filter(|(seq, ..)| *seq > since)
+            .map(|(seq, at, e)| {
+                serde_json::json!({
+                    "seq": seq, "at": at, "app_id": e.app_id, "game": e.game, "kind": e.kind, "detail": e.detail,
+                })
+            })
+            .collect();
+        serde_json::json!({"seq": self.seq, "events": events})
+    }
+}
+
 /// One save location the daemon watches.
 #[derive(Debug, Clone, PartialEq)]
 struct WatchRoot {
@@ -1071,9 +1151,13 @@ pub enum WatchCommand {
     Sync(Option<u64>),
     TogglePause,
     SetPaused(bool),
-    /// Steam reported a game start / stop (see `GameSession` hints).
-    GameStarted(u64),
+    /// Steam reported a game start / stop (see `GameSession` hints). A
+    /// start with a reply channel syncs the game first and replies when
+    /// done — the Decky plugin keeps the game paused until then.
+    GameStarted(u64, Option<std::sync::mpsc::Sender<String>>),
     GameStopped(u64),
+    /// Reply with `EventLog::since` as JSON.
+    Events(Option<u64>, std::sync::mpsc::Sender<String>),
     /// Reply with the daemon's state as one JSON line.
     Status(std::sync::mpsc::Sender<String>),
     Quit,
@@ -1082,24 +1166,27 @@ pub enum WatchCommand {
 /// Answers one control-socket request by forwarding it to the watch loop.
 fn remote_command(tx: &std::sync::mpsc::Sender<WatchCommand>, request: control::Request) -> String {
     use control::Request;
+    // Requests answered by the loop itself; it checks commands at least
+    // every 2 s, but a sync in progress holds it up.
+    let ask = |make: &dyn Fn(std::sync::mpsc::Sender<String>) -> WatchCommand, wait_secs: u64| -> String {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if tx.send(make(reply_tx)).is_err() {
+            return "error: watch loop has stopped".into();
+        }
+        reply_rx
+            .recv_timeout(std::time::Duration::from_secs(wait_secs))
+            .unwrap_or_else(|_| "error: daemon is busy (syncing); try again".into())
+    };
     let command = match request {
-        Request::GameStarted(id) => WatchCommand::GameStarted(id),
+        // Waits for the pre-launch sync (see WatchCommand::GameStarted).
+        Request::GameStarted(id) => return ask(&|reply| WatchCommand::GameStarted(id, Some(reply)), 150),
+        Request::Events(since) => return ask(&|reply| WatchCommand::Events(since, reply), 8),
         Request::GameStopped(id) => WatchCommand::GameStopped(id),
         Request::Sync(target) => WatchCommand::Sync(target),
         Request::Pause => WatchCommand::SetPaused(true),
         Request::Resume => WatchCommand::SetPaused(false),
         Request::Quit => WatchCommand::Quit,
-        Request::Status => {
-            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-            if tx.send(WatchCommand::Status(reply_tx)).is_err() {
-                return "error: watch loop has stopped".into();
-            }
-            // The loop checks commands at least every 2 s, but a sync in
-            // progress holds it up.
-            return reply_rx
-                .recv_timeout(std::time::Duration::from_secs(8))
-                .unwrap_or_else(|_| "error: daemon is busy (syncing); try again".into());
-        }
+        Request::Status => return ask(&WatchCommand::Status, 8),
     };
     match tx.send(command) {
         Ok(()) => "ok".into(),
@@ -1279,9 +1366,10 @@ fn watch_loop(
         eprintln!("control socket unavailable (watch send won't reach this daemon): {err:#}");
     }
 
+    let mut log = EventLog::default();
     println!("initial sync pass…");
     report("initial sync…");
-    if let Err(err) = run_sync(None, false) {
+    if let Err(err) = log.sync(None) {
         eprintln!("initial sync failed (will keep watching): {err:#}");
     }
 
@@ -1352,7 +1440,7 @@ fn watch_loop(
                 }
                 WatchCommand::Sync(target) => {
                     report("syncing…");
-                    match run_sync(target, false) {
+                    match log.sync(target) {
                         Ok(()) => report("synced (manual)"),
                         Err(err) => {
                             eprintln!("manual sync failed: {err:#}");
@@ -1368,15 +1456,32 @@ fn watch_loop(
                 }
                 // Steam reports non-Steam shortcuts and tools too; only
                 // installed Steam games matter.
-                WatchCommand::GameStarted(app_id) | WatchCommand::GameStopped(app_id)
-                    if !ctx.games.iter().any(|g| g.app_id == app_id) => {}
-                WatchCommand::GameStarted(app_id) => {
-                    println!("Steam reports app {app_id} started");
-                    exits.extend(session.hint_started(app_id));
+                WatchCommand::GameStarted(app_id, reply) => {
+                    if ctx.games.iter().any(|g| g.app_id == app_id) {
+                        // The plugin holds the game paused until we reply:
+                        // pull newer cloud saves before it reads them.
+                        if !paused {
+                            println!("Steam reports app {app_id} starting — syncing it first");
+                            if let Err(err) = log.sync(Some(app_id)) {
+                                eprintln!("pre-launch sync of {app_id} failed: {err:#}");
+                            }
+                            dirty.remove(&app_id);
+                        } else {
+                            println!("Steam reports app {app_id} started");
+                        }
+                        exits.extend(session.hint_started(app_id));
+                    }
+                    if let Some(reply) = reply {
+                        let _ = reply.send("ok".into());
+                    }
                 }
+                WatchCommand::GameStopped(app_id) if !ctx.games.iter().any(|g| g.app_id == app_id) => {}
                 WatchCommand::GameStopped(app_id) => {
                     println!("Steam reports app {app_id} stopped");
                     exits.extend(session.hint_stopped(app_id, Instant::now()));
+                }
+                WatchCommand::Events(since, reply) => {
+                    let _ = reply.send(log.since(since).to_string());
                 }
                 WatchCommand::Status(reply) => {
                     let mut pending: Vec<u64> = dirty.keys().copied().collect();
@@ -1401,7 +1506,7 @@ fn watch_loop(
             if !paused {
                 println!("app {prev} exited — syncing");
                 report("game exited — syncing…");
-                match run_sync(Some(prev), false) {
+                match log.sync(Some(prev)) {
                     Ok(()) => report("synced after game exit"),
                     Err(err) => {
                         eprintln!("sync after exit of {prev} failed: {err:#}");
@@ -1423,7 +1528,7 @@ fn watch_loop(
             for app_id in settled {
                 println!("saves settled for app {app_id} — syncing");
                 report("saves changed — syncing…");
-                match run_sync(Some(app_id), false) {
+                match log.sync(Some(app_id)) {
                     Ok(()) => report("synced"),
                     Err(err) => {
                         eprintln!("sync of {app_id} failed: {err:#}");
@@ -1784,7 +1889,10 @@ fn config_cmd(args: &[String]) -> Result<()> {
             .context("--mode must be one of: auto, sync, backup, off")?;
     }
     if let Some(keep) = flag_value(args, "--keep") {
-        game_cfg.keep = Some(keep.parse().context("--keep must be a number")?);
+        game_cfg.keep = match keep.as_str() {
+            "default" => None,
+            n => Some(n.parse().context("--keep must be a number or `default`")?),
+        };
     }
     cfg.games.insert(app_id, game_cfg.clone());
     cfg.save()?;
@@ -1991,7 +2099,7 @@ fn selftest() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_run_args, GameSession, WatchRoot};
+    use super::{parse_run_args, EventLog, GameSession, SyncEvent, WatchRoot};
     use std::path::{Path, PathBuf};
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -2030,6 +2138,26 @@ mod tests {
         assert_eq!(session.update(None, at(70)), Some(2140020));
         assert_eq!(session.active, None);
         assert_eq!(session.update(None, at(80)), None, "no second exit");
+    }
+
+    #[test]
+    fn event_log_returns_only_newer_events_and_caps_its_size() {
+        let event = |kind| SyncEvent { app_id: Some(1), game: Some("G".into()), kind, detail: String::new() };
+        let mut log = EventLog::default();
+        assert_eq!(log.since(None), serde_json::json!({"seq": 0, "events": []}));
+        log.record(event("uploaded"));
+        log.record(event("conflict"));
+        let start = log.since(None);
+        assert_eq!(start["seq"], 2);
+        assert!(start["events"].as_array().unwrap().is_empty(), "no backlog for a new client");
+        let newer = log.since(Some(1));
+        assert_eq!(newer["events"].as_array().unwrap().len(), 1);
+        assert_eq!(newer["events"][0]["kind"], "conflict");
+        for _ in 0..150 {
+            log.record(event("uploaded"));
+        }
+        assert_eq!(log.events.len(), EventLog::CAPACITY);
+        assert_eq!(log.since(Some(0))["seq"], 152);
     }
 
     #[test]
@@ -2143,7 +2271,7 @@ fn main() -> Result<()> {
                  pending-location <appid>\n  \
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
-                 config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
+                 config [--json | <appid> --mode auto|sync|backup|off --keep N|default | --clear]\n  \
                  icons [appid...] [--offline] [--json] [--embed]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \
                  rm <appid> <version-id>"

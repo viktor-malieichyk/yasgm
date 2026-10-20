@@ -1326,9 +1326,37 @@ and fast until the release is otherwise ready). Status is tracked inline.
      (`not_needed` on LocalFolder); existing-daemon case (exit 3 → uses
      it); plugin-owned daemon start, `kill -9` → restarted in 5 s, clean
      unload with socket removed.
-   - Not done yet: conflict toast (D5), per-game keep setting,
-     "pull newer saves before launch" (decky-cloud-save pauses the game
-     with SIGSTOP meanwhile — candidate).
+   - **Toasts, keep setting, pull before launch (2026-10-20).**
+     `run_sync` now returns `SyncEvent`s (uploaded / downloaded / conflict
+     / cloud_ahead / quota_exceeded / error); the daemon keeps the last
+     100 in an `EventLog` and answers `watch send events [since]` →
+     `{seq, events}` (no `since`: just the latest number, so a new client
+     gets no backlog). The plugin backend polls it every 5 s directly over
+     the socket (asyncio unix connection, no process spawn; restarts its
+     count if the daemon's `seq` went backwards) and emits
+     `yasgm_sync_event` → frontend toast per kind (replaces the +20/+60 s
+     `games --json` re-reads). Keep: `config <id> --keep N|default`
+     (`default` new) → game-page dropdown Default/3/5/10/20/50
+     (`set_keep`). Pull before launch: on Steam's start notification the
+     backend SIGSTOPs `nInstanceID` and its descendants (from /proc, own
+     uid only), sends `game-started` — which now, with a reply channel,
+     makes the daemon `run_sync` that game first (normal matrix: download
+     only if cloud changed and local didn't, conflict keeps both,
+     backup-only never overwrites) and replies when done (≤150 s) — then
+     SIGCONTs in a `finally`. Verified on the VM with a second fake
+     machine (separate HOME, same LocalFolder provider): fake game tree
+     state `T` during the pre-launch sync, `S` after; the other machine's
+     newer file was on disk before resume; `downloaded` and (with the
+     daemon paused while both sides changed) `conflict` events reached the
+     frontend relay; keep 5 → default round-trips. (The VM rebooted once
+     mid-test — journal: "Reboot key pressed short" from the launcher,
+     not the test.)
+   - Follow-up found while testing: restore/download never deletes local
+     files (D14), so a file that exists only locally survives a download;
+     local then differs from the downloaded head and the next sync
+     uploads it again as a new version. No data loss, but an extra
+     version — consider removing files that the previous synced version
+     had and the downloaded one doesn't.
 5. **Decky self-update** (D21): release zip + sha256 + signature, in-plugin
    update check/apply/rollback.
 6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see

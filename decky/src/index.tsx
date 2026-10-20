@@ -43,6 +43,18 @@ interface Game {
   cross_os_note: string | null;
   last_version: string | null;
   synced_at: number | null;
+  keep: number | null;
+  default_keep: number;
+}
+
+/** One entry of the daemon's event log (`watch send events`). */
+interface SyncEvent {
+  seq: number;
+  at: number;
+  app_id: number | null;
+  game: string | null;
+  kind: "uploaded" | "downloaded" | "conflict" | "cloud_ahead" | "quota_exceeded" | "error";
+  detail: string;
 }
 
 /** One row of `yasgm versions <appid> --json`. */
@@ -71,13 +83,35 @@ const getGames = callable<[], Game[]>("get_games");
 const getVersions = callable<[appId: number], Version[]>("get_versions");
 const syncNow = callable<[appId: number], string>("sync_now");
 const setPaused = callable<[paused: boolean], string>("set_paused");
-const gameEvent = callable<[appId: number, running: boolean], void>("game_event");
+const gameEvent = callable<[appId: number, running: boolean, pid: number], void>("game_event");
+const setKeep = callable<[appId: number, keep: number], string>("set_keep");
 const restoreVersion = callable<[appId: number, versionId: string], string>("restore");
 const setPinned = callable<[appId: number, versionId: string, pinned: boolean], string>("set_pinned");
 const setMode = callable<[appId: number, mode: string], string>("set_mode");
 const useOnedrive = callable<[], string>("use_onedrive");
 const startSignIn = callable<[], void>("start_sign_in");
 const cancelSignIn = callable<[], void>("cancel_sign_in");
+
+const KEEP_CHOICES = [3, 5, 10, 20, 50];
+
+/** Toast text for a sync event from the daemon. */
+function eventToast(e: SyncEvent): string {
+  const game = e.game ?? "a game";
+  switch (e.kind) {
+    case "uploaded":
+      return e.detail === "offline" ? `Saves kept on this Deck until you're online — ${game}` : `Saves backed up — ${game}`;
+    case "downloaded":
+      return `Newer saves from ${e.detail} restored — ${game}`;
+    case "conflict":
+      return `${game}: saves changed here and on another device — kept both; the other version is pinned`;
+    case "cloud_ahead":
+      return `${game}: newer saves from ${e.detail} are in the cloud — restore them in YASGM if you want them`;
+    case "quota_exceeded":
+      return "OneDrive is full — syncing stopped until there's space";
+    case "error":
+      return `Sync failed: ${e.detail.length > 140 ? e.detail.slice(0, 140) + "…" : e.detail}`;
+  }
+}
 
 const MODES = [
   { data: "auto", label: "Auto" },
@@ -399,6 +433,18 @@ function GamePage() {
               onChange={(option) => act(() => setMode(id, option.data))}
             />
           </div>
+          <div style={{ flex: 1 }}>
+            <DropdownItem
+              label="Keep versions"
+              rgOptions={[
+                { data: 0, label: `Default (${game.default_keep})` },
+                ...KEEP_CHOICES.map((n) => ({ data: n, label: String(n) })),
+              ]}
+              selectedOption={game.keep ?? 0}
+              disabled={busy}
+              onChange={(option) => act(() => setKeep(id, option.data))}
+            />
+          </div>
           <DialogButton style={{ width: 200, alignSelf: "center" }} disabled={busy} onClick={() => act(() => syncNow(id))}>
             Sync this game
           </DialogButton>
@@ -438,38 +484,20 @@ function GamePage() {
 
 // ---- plugin -----------------------------------------------------------------------
 
-/** After a game stops, check whether the daemon synced it and say so. */
-async function toastWhenSynced(appId: number, before: number | null) {
-  for (const delay of [20_000, 60_000]) {
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    try {
-      const game = (await getGames()).find((g) => g.app_id === appId);
-      if (game?.synced_at && game.synced_at !== before) {
-        toaster.toast({ title: "YASGM", body: `Saves synced — ${game.game}` });
-        return;
-      }
-    } catch {
-      return;
-    }
-  }
-}
-
 export default definePlugin(() => {
   routerHook.addRoute("/yasgm/game/:appId", GamePage, { exact: true });
 
   // Steam's own start/stop notifications, forwarded to the daemon: more
-  // reliable than its process detection, and immediate on exit.
-  const lastSynced = new Map<number, number | null>();
+  // reliable than its process detection, and immediate on exit. On a start
+  // the backend pauses the game (nInstanceID is its process) while the
+  // daemon pulls newer cloud saves.
   const lifetime = SteamClient.GameSessions.RegisterForAppLifetimeNotifications((n) => {
-    gameEvent(n.unAppID, n.bRunning);
-    if (n.bRunning) {
-      getGames()
-        .then((games) => lastSynced.set(n.unAppID, games.find((g) => g.app_id === n.unAppID)?.synced_at ?? null))
-        .catch(() => {});
-    } else if (lastSynced.has(n.unAppID)) {
-      toastWhenSynced(n.unAppID, lastSynced.get(n.unAppID) ?? null);
-      lastSynced.delete(n.unAppID);
-    }
+    gameEvent(n.unAppID, n.bRunning, n.nInstanceID);
+  });
+
+  // The daemon's sync results (relayed by the backend) as toasts.
+  const syncEvents = addEventListener<[SyncEvent]>("yasgm_sync_event", (e) => {
+    toaster.toast({ title: "YASGM", body: eventToast(e) });
   });
 
   return {
@@ -479,6 +507,7 @@ export default definePlugin(() => {
     icon: <FaCloudUploadAlt />,
     onDismount() {
       lifetime.unregister();
+      removeEventListener("yasgm_sync_event", syncEvents);
       routerHook.removeRoute("/yasgm/game/:appId");
     },
   };

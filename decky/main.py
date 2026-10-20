@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import platform
+import signal
 import stat
 
 import decky
@@ -63,6 +64,59 @@ async def run_json(*args: str, timeout: float = 120):
     return json.loads(await run(*args, timeout=timeout))
 
 
+def socket_path() -> str:
+    """The daemon's control socket (`yasgm watch send` talks to it too)."""
+    data = os.environ.get("XDG_DATA_HOME")
+    if not data or not os.path.isabs(data):
+        data = os.path.join(decky.DECKY_USER_HOME, ".local", "share")
+    return os.path.join(data, "yasgm", "watch.sock")
+
+
+async def ask_daemon(request: str, timeout: float = 10) -> str:
+    """One request over the control socket, without starting a process."""
+    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(socket_path()), timeout)
+    try:
+        writer.write(request.encode() + b"\n")
+        await writer.drain()
+        return (await asyncio.wait_for(reader.readline(), timeout)).decode().strip()
+    finally:
+        writer.close()
+
+
+def process_tree(root: int) -> list:
+    """`root` and all its descendants that belong to us (from /proc)."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as f:
+                # pid (comm) state ppid …; comm may contain spaces/parens.
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    tree, todo = [], [root]
+    while todo:
+        pid = todo.pop()
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+                continue
+        except OSError:
+            continue
+        tree.append(pid)
+        todo.extend(children.get(pid, []))
+    return tree
+
+
+def signal_all(pids: list, sig) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
 class Plugin:
     daemon = None  # asyncio.subprocess.Process of our `yasgm watch` child
     stopping = False
@@ -74,6 +128,26 @@ class Plugin:
         self.stopping = False
         self.loop = asyncio.get_event_loop()
         self.loop.create_task(self._supervise_daemon())
+        self.loop.create_task(self._relay_sync_events())
+
+    async def _relay_sync_events(self):
+        """Polls the daemon's event log and emits each new sync event to the
+        frontend (`yasgm_sync_event`), which shows it as a toast."""
+        since = None
+        while not self.stopping:
+            await asyncio.sleep(5)
+            try:
+                reply = json.loads(await ask_daemon("events" if since is None else f"events {since}"))
+            except Exception:
+                continue  # daemon not running (yet) or busy syncing
+            seq = reply.get("seq", 0)
+            if since is not None and seq < since:
+                since = None  # daemon restarted: start over from its count
+                continue
+            if since is not None:
+                for event in reply.get("events", []):
+                    await decky.emit("yasgm_sync_event", event)
+            since = seq
 
     async def _supervise_daemon(self):
         """Keeps `yasgm watch` running; restarts it (with backoff) if it dies."""
@@ -150,18 +224,39 @@ class Plugin:
     async def set_paused(self, paused: bool) -> str:
         return (await run("watch", "send", "pause" if paused else "resume", timeout=15)).strip()
 
-    async def game_event(self, app_id: int, running: bool) -> None:
-        """Forwards Steam's app-lifetime notification to the daemon."""
+    async def game_event(self, app_id: int, running: bool, pid: int = 0) -> None:
+        """Forwards Steam's app-lifetime notification to the daemon. On a
+        start, the game (`pid`, Steam's nInstanceID, and its descendants) is
+        paused while the daemon syncs it, so newer cloud saves land before
+        the game reads them; it's always resumed afterwards."""
+        if not running:
+            try:
+                await ask_daemon(f"game-stopped {app_id}", timeout=15)
+            except Exception as err:
+                decky.logger.warning(f"could not forward game stop for {app_id}: {err}")
+            return
+        frozen = process_tree(pid) if pid > 1 else []
+        signal_all(frozen, signal.SIGSTOP)
         try:
-            await run("watch", "send", "game-started" if running else "game-stopped", str(app_id), timeout=15)
+            reply = await ask_daemon(f"game-started {app_id}", timeout=170)
+            if reply != "ok":
+                decky.logger.warning(f"pre-launch sync of {app_id}: {reply}")
         except Exception as err:
-            decky.logger.warning(f"could not forward game event for {app_id}: {err}")
+            decky.logger.warning(f"could not forward game start for {app_id}: {err}")
+        finally:
+            signal_all(frozen, signal.SIGCONT)
+        if frozen:
+            decky.logger.info(f"held {app_id} ({len(frozen)} processes) for its pre-launch sync")
 
     async def restore(self, app_id: int, version_id: str) -> str:
         return (await run("restore", str(app_id), "--version", version_id, timeout=600)).strip()
 
     async def set_pinned(self, app_id: int, version_id: str, pinned: bool) -> str:
         return (await run("pin" if pinned else "unpin", str(app_id), version_id)).strip()
+
+    async def set_keep(self, app_id: int, keep: int) -> str:
+        """How many versions to keep for a game; 0 = the default."""
+        return (await run("config", str(app_id), "--keep", str(keep) if keep > 0 else "default")).strip()
 
     async def set_mode(self, app_id: int, mode: str) -> str:
         if mode not in ("auto", "sync", "backup", "off"):

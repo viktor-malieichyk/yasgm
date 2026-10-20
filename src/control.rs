@@ -24,10 +24,12 @@ pub enum Request {
     Resume,
     Quit,
     Status,
+    /// Sync events after this number (none: just the latest number).
+    Events(Option<u64>),
 }
 
-pub const USAGE: &str =
-    "usage: yasgm watch send game-started <appid> | game-stopped <appid> | sync [appid] | pause | resume | quit | status";
+pub const USAGE: &str = "usage: yasgm watch send game-started <appid> | game-stopped <appid> | sync [appid] | \
+     pause | resume | quit | status | events [since]";
 
 pub fn parse(line: &str) -> Result<Request> {
     let mut words = line.split_whitespace();
@@ -43,6 +45,7 @@ pub fn parse(line: &str) -> Result<Request> {
         "resume" => Request::Resume,
         "quit" => Request::Quit,
         "status" => Request::Status,
+        "events" => Request::Events(words.next().map(|w| w.parse().context("since must be a number")).transpose()?),
         "" => bail!("empty request"),
         other => bail!("unknown request {other:?}"),
     };
@@ -96,7 +99,8 @@ pub fn send(line: &str) -> Result<String> {
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path)
         .with_context(|| format!("no watch daemon listening on {}", path.display()))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    // `game-started` waits for the daemon's pre-launch sync.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(180)))?;
     writeln!(stream, "{}", line.trim())?;
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply).context("reading the daemon's reply")?;
@@ -130,6 +134,9 @@ mod tests {
         assert_eq!(parse("sync").unwrap(), Request::Sync(None));
         assert_eq!(parse("sync 42").unwrap(), Request::Sync(Some(42)));
         assert_eq!(parse("  status ").unwrap(), Request::Status);
+        assert_eq!(parse("events").unwrap(), Request::Events(None));
+        assert_eq!(parse("events 12").unwrap(), Request::Events(Some(12)));
+        assert!(parse("events x").is_err());
         assert!(parse("game-started").is_err());
         assert!(parse("game-started abc").is_err());
         assert!(parse("quit now").is_err());
