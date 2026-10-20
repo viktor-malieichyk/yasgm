@@ -1063,8 +1063,44 @@ and fast until the release is otherwise ready). Status is tracked inline.
    from the CLI or GUI can still run concurrently with the daemon's own
    sync; a per-operation lock is a candidate follow-up.
 2. **Desktop auto-update (D20)**: `tauri-plugin-updater` + Settings toggle
-   + update banner + daemon stop/restart around install. Code can land
-   before the key exists; enabling it needs the owner's public key.
+   + update banner + daemon stop/restart around install. **DONE on macOS
+   2026-10-20; Windows unverified.** GUI (`ui/src-tauri/src/lib.rs`): `check_update`
+   / `install_update` / `app_version` commands; the found `Update` is held
+   in managed state so Install installs exactly what was shown;
+   `YASGM_UPDATE_ENDPOINT` overrides the feed for local testing (artifacts
+   are still verified against the baked-in key). Install runs
+   `yasgm watch stop`, `download_and_install`, then `app.restart()`; on
+   failure it restarts the daemon if it had been running. On every GUI
+   start `ensure_daemon` runs `watch start` when autostart is on — this is
+   what brings the daemon back after an update (side effect: opening the
+   GUI also revives a daemon the user quit from the tray, if autostart is
+   on). Frontend: banner with **Install & restart**, Settings → Updates
+   (current version, "Check automatically" toggle stored in localStorage,
+   default on, check on start + every 24 h, "Check now"). Background checks
+   are silent unless an update exists. `tauri.conf.json`:
+   `createUpdaterArtifacts`, pubkey (key pair in `~/.tauri/yasgm-updater.key`,
+   password-protected), GitHub `latest.json` endpoint, Windows
+   `installMode: passive`. CLI: `yasgm watch stop` (SIGTERM, then SIGKILL
+   after 10 s; `taskkill /F` on Windows — no graceful channel yet, safe
+   because all local state writes are now atomic via new `src/fsutil.rs`:
+   config, state, tokens (0600 applied to the temp file pre-rename),
+   manifest + etag) and `yasgm watch start` (detached, own process group /
+   `CREATE_NO_WINDOW`, `--tray` on Win/mac, waits for the lock). Both are
+   idempotent with `--json`; verified live on macOS (start twice → same
+   pid, stop twice → `was_running` true then false, `state.json` valid).
+   Build gotcha: Xcode 27's `strip` corrupts proc-macro dylibs, so both
+   crates set `[profile.release.build-override] strip = false`.
+   **E2E verified on macOS**: signed release 0.1.1 `.app.tar.gz` served
+   from a local `latest.json`; a `--debug` 0.1.0 bundle (release builds
+   reject non-https endpoints, so the test feed needs a debug build of the
+   *old* version) launched with `YASGM_UPDATE_ENDPOINT`, showed the banner,
+   Install & restart downloaded, verified and swapped the bundle (now
+   0.1.1), relaunched, and `ensure_daemon` restarted the daemon from the
+   new sidecar (new pid); `state.json` valid. Signing for builds: `source
+   ~/.tauri/yasgm-signing.env` (owner-created, 0600; exports
+   `TAURI_SIGNING_PRIVATE_KEY` + password) before `npm run tauri build`.
+   **Remaining**: same test on Windows (NSIS passive install, `taskkill`
+   stop path).
 3. **CLI groundwork for Decky**: `--json` for `status`, `auth --device`
    (code/URL/expiry events), `games`; daemon control channel for external
    start/stop events; static `x86_64-` and `aarch64-unknown-linux-musl`

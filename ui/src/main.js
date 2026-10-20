@@ -2,6 +2,8 @@ const { invoke } = window.__TAURI__.core;
 
 const MODES = ["auto", "sync", "backup", "off"];
 const THEME_KEY = "yasgm-theme";
+const AUTO_UPDATE_KEY = "yasgm-auto-update";
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 let gamesListEl;
 let detailEmptyEl;
@@ -34,6 +36,13 @@ let providerLocalBrowseBtnEl;
 let providerLocalBtnEl;
 let autostartToggleEl;
 let autostartDetailEl;
+let updateBannerEl;
+let updateBannerTextEl;
+let updateInstallBtnEl;
+let updateCurrentEl;
+let updateAutoToggleEl;
+let updateCheckBtnEl;
+let updateMsgEl;
 
 let games = [];
 let selectedAppId = null;
@@ -456,6 +465,65 @@ async function toggleAutostart() {
   }
 }
 
+// ---- auto-update (D20) ----------------------------------------------------
+
+// Per-viewer preference like the theme; defaults to on when unset or when
+// storage is unavailable.
+function autoUpdateEnabled() {
+  try {
+    return localStorage.getItem(AUTO_UPDATE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+async function loadUpdateSettings() {
+  updateAutoToggleEl.checked = autoUpdateEnabled();
+  try {
+    updateCurrentEl.textContent = `Current version: ${await invoke("app_version")}`;
+  } catch {
+    updateCurrentEl.textContent = "";
+  }
+}
+
+// `manual` = user clicked "Check now": report "up to date" and errors.
+// Background checks stay silent unless an update is actually found.
+async function checkForUpdate(manual) {
+  if (manual) {
+    updateMsgEl.textContent = "checking…";
+    updateCheckBtnEl.disabled = true;
+  }
+  try {
+    const update = await invoke("check_update");
+    if (update) {
+      updateBannerTextEl.textContent = `Update available: YASGM ${update.version} (you have ${update.current})`;
+      updateBannerTextEl.title = update.notes || "";
+      updateBannerEl.classList.remove("hidden");
+      if (manual) updateMsgEl.textContent = `version ${update.version} is available`;
+    } else {
+      updateBannerEl.classList.add("hidden");
+      if (manual) updateMsgEl.textContent = "you're up to date";
+    }
+  } catch (err) {
+    if (manual) updateMsgEl.textContent = `update check failed: ${err}`;
+    else console.warn("background update check failed:", err);
+  } finally {
+    updateCheckBtnEl.disabled = false;
+  }
+}
+
+async function installUpdate() {
+  updateInstallBtnEl.disabled = true;
+  updateBannerTextEl.textContent = "Stopping sync daemon, downloading and installing… the app will restart.";
+  try {
+    // Only returns on failure: success relaunches the app.
+    await invoke("install_update");
+  } catch (err) {
+    updateBannerTextEl.textContent = `${err}`;
+    updateInstallBtnEl.disabled = false;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   gamesListEl = document.querySelector("#games-list");
   detailEmptyEl = document.querySelector("#detail-empty");
@@ -488,6 +556,13 @@ window.addEventListener("DOMContentLoaded", () => {
   providerLocalBtnEl = document.querySelector("#provider-local-btn");
   autostartToggleEl = document.querySelector("#autostart-toggle");
   autostartDetailEl = document.querySelector("#autostart-detail");
+  updateBannerEl = document.querySelector("#update-banner");
+  updateBannerTextEl = document.querySelector("#update-banner-text");
+  updateInstallBtnEl = document.querySelector("#update-install-btn");
+  updateCurrentEl = document.querySelector("#update-current");
+  updateAutoToggleEl = document.querySelector("#update-auto-toggle");
+  updateCheckBtnEl = document.querySelector("#update-check-btn");
+  updateMsgEl = document.querySelector("#update-msg");
 
   saveBtnEl.addEventListener("click", saveSelectedGame);
   resetBtnEl.addEventListener("click", resetSelectedGame);
@@ -512,8 +587,20 @@ window.addEventListener("DOMContentLoaded", () => {
   providerLocalBrowseBtnEl.addEventListener("click", browseLocalFolder);
   providerLocalBtnEl.addEventListener("click", useLocalFolder);
   autostartToggleEl.addEventListener("change", toggleAutostart);
+  updateInstallBtnEl.addEventListener("click", installUpdate);
+  updateCheckBtnEl.addEventListener("click", () => checkForUpdate(true));
+  updateAutoToggleEl.addEventListener("change", () => {
+    try {
+      localStorage.setItem(AUTO_UPDATE_KEY, updateAutoToggleEl.checked ? "on" : "off");
+    } catch {}
+  });
 
   loadTheme();
   loadAccentColor();
   loadGames();
+  loadUpdateSettings();
+  if (autoUpdateEnabled()) checkForUpdate(false);
+  setInterval(() => {
+    if (autoUpdateEnabled()) checkForUpdate(false);
+  }, UPDATE_CHECK_INTERVAL_MS);
 });

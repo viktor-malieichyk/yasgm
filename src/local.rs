@@ -44,11 +44,7 @@ impl Provider for LocalFolderProvider {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(format!(".tmp{}", std::process::id()));
-        let tmp = dest.with_file_name(tmp_name);
-        fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &dest).with_context(|| format!("renaming into {}", dest.display()))
+        crate::fsutil::write_atomic(&dest, bytes)
     }
 
     fn delete(&self, rel: &str) -> Result<()> {

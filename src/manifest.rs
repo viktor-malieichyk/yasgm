@@ -140,9 +140,11 @@ pub fn load() -> Result<Manifest> {
                 .into_reader()
                 .read_to_end(&mut body)
                 .context("downloading manifest")?;
-            fs::write(&yaml_path, &body)?;
+            // yaml before etag: a crash in between leaves a fresh yaml with
+            // the old etag, which only costs one redundant download.
+            crate::fsutil::write_atomic(&yaml_path, &body)?;
             if let Some(etag) = etag {
-                fs::write(&etag_path, etag)?;
+                crate::fsutil::write_atomic(&etag_path, etag.as_bytes())?;
             }
             eprintln!(
                 "manifest: downloaded {:.1} MB",

@@ -15,10 +15,11 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Shows and focuses the main window (tray menu "Show", tray icon click,
 /// and macOS Dock-icon "reopen" all funnel through here).
@@ -256,6 +257,93 @@ async fn set_autostart(app: AppHandle, enabled: bool) -> Result<String, String> 
     run_yasgm(&app, &["autostart", if enabled { "on" } else { "off" }]).await
 }
 
+// ---- auto-update (D20) ----------------------------------------------------
+
+/// The update found by the last `check_update`, kept so `install_update`
+/// installs exactly what the user was shown.
+#[derive(Default)]
+struct PendingUpdate(std::sync::Mutex<Option<Update>>);
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// `null` when up to date, else `{"version", "current", "notes", "date"}`.
+/// The feed is `latest.json` on GitHub Releases (tauri.conf.json →
+/// plugins.updater.endpoints); `YASGM_UPDATE_ENDPOINT` overrides it for
+/// local testing. The override can't weaken anything: artifacts are still
+/// verified against the baked-in public key.
+#[tauri::command]
+async fn check_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Result<Option<serde_json::Value>, String> {
+    let mut builder = app.updater_builder();
+    if let Ok(endpoint) = std::env::var("YASGM_UPDATE_ENDPOINT") {
+        let url = endpoint.parse().map_err(|err| format!("YASGM_UPDATE_ENDPOINT: {err}"))?;
+        builder = builder.endpoints(vec![url]).map_err(|err| err.to_string())?;
+    }
+    let update = builder
+        .build()
+        .map_err(|err| err.to_string())?
+        .check()
+        .await
+        .map_err(|err| err.to_string())?;
+    let info = update.as_ref().map(|u| {
+        serde_json::json!({
+            "version": u.version,
+            "current": u.current_version,
+            "notes": u.body,
+            "date": u.date.map(|d| d.unix_timestamp()),
+        })
+    });
+    *pending.0.lock().unwrap() = update;
+    Ok(info)
+}
+
+/// Stops the watch daemon (its binary is the sidecar inside the bundle
+/// being replaced — on Windows a running exe can't even be overwritten),
+/// downloads + verifies + installs the update, then relaunches. The
+/// relaunched GUI brings the daemon back via `ensure_daemon`. On Windows
+/// the NSIS installer exits and restarts the app itself, so the restart
+/// below is only reached on macOS/Linux.
+#[tauri::command]
+async fn install_update(app: AppHandle, pending: State<'_, PendingUpdate>) -> Result<(), String> {
+    let update = pending
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("no update pending — check for updates first")?;
+    let stopped = run_yasgm(&app, &["watch", "stop", "--json"]).await?;
+    let was_running = serde_json::from_str::<serde_json::Value>(stopped.trim())
+        .ok()
+        .and_then(|v| v["was_running"].as_bool())
+        .unwrap_or(false);
+    if let Err(err) = update.download_and_install(|_, _| {}, || {}).await {
+        if was_running {
+            let _ = run_yasgm(&app, &["watch", "start"]).await;
+        }
+        return Err(format!("update failed: {err}"));
+    }
+    app.restart();
+}
+
+/// If autostart is on, the user wants the daemon running: start it when it
+/// isn't (no-op otherwise — the daemon lock makes this idempotent). This is
+/// also what restores the daemon after `install_update` stopped it.
+async fn ensure_daemon(app: AppHandle) {
+    let enabled = run_yasgm(&app, &["autostart", "--json"])
+        .await
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(out.trim()).ok())
+        .and_then(|v| v["enabled"].as_bool())
+        .unwrap_or(false);
+    if enabled {
+        if let Err(err) = run_yasgm(&app, &["watch", "start"]).await {
+            eprintln!("could not start watch daemon: {err}");
+        }
+    }
+}
+
 /// Closing the window hides it instead of quitting (minimize to tray); the
 /// tray icon's "Show YASGM" / left-click, or clicking the Dock icon again
 /// on macOS, bring it back. "Quit YASGM" in the tray menu is the only way
@@ -275,6 +363,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             list_versions,
             restore_version,
@@ -296,7 +386,10 @@ pub fn run() {
             get_pending_location,
             open_path,
             open_url,
-            get_accent_color
+            get_accent_color,
+            app_version,
+            check_update,
+            install_update
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show YASGM", true, None::<&str>)?;
@@ -316,6 +409,7 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+            tauri::async_runtime::spawn(ensure_daemon(app.handle().clone()));
             Ok(())
         })
         .on_window_event(|window, event| {

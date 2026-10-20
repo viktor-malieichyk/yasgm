@@ -18,6 +18,11 @@
         </nav>
       </div>
 
+      <div id="update-banner" class="update-banner hidden">
+        <span id="update-banner-text"></span>
+        <button id="update-install-btn" type="button">Install &amp; restart</button>
+      </div>
+
       <div id="library-view" class="shell">
         <aside id="games-list"></aside>
 
@@ -105,6 +110,19 @@
             Launch YASGM's sync daemon at login
           </label>
           <p id="autostart-detail" class="muted"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Updates</h3>
+          <p id="update-current" class="muted"></p>
+          <label class="toggle-row">
+            <input id="update-auto-toggle" type="checkbox" />
+            Check for updates automatically
+          </label>
+          <div class="settings-row">
+            <button id="update-check-btn" type="button">Check now</button>
+            <span id="update-msg" class="muted"></span>
+          </div>
         </section>
       </div>
 

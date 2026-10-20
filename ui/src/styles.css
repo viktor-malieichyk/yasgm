@@ -353,6 +353,22 @@ button:disabled {
   color: var(--badge-pending-fg);
 }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8em;
+  width: 100%;
+  max-width: 900px;
+  box-sizing: border-box;
+  margin-bottom: 0.8em;
+  padding: 0.5em 0.9em;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background-color: var(--selected-bg);
+  text-align: left;
+}
+
 #status-msg {
   margin-top: 1.2em;
   opacity: 0.7;

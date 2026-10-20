@@ -106,8 +106,7 @@ fn load_json<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {
 
 fn save_json<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let path = config_dir()?.join(name);
-    fs::write(&path, serde_json::to_vec_pretty(value)?)
-        .with_context(|| format!("writing {}", path.display()))
+    crate::fsutil::write_atomic(&path, &serde_json::to_vec_pretty(value)?)
 }
 
 impl Config {

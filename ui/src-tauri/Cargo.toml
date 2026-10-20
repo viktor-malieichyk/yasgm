@@ -25,4 +25,13 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tauri-plugin-updater = "2"
 
+
+# Proc-macro dylibs are built with the build-override profile. Stripping them
+# (release default: strip = "debuginfo") with Xcode 27's `strip` leaves a
+# "mis-aligned LINKEDIT string pool" that dyld refuses to load, failing the
+# build with "can't find crate for `<x>_macros`". Shipped binaries are still
+# stripped as usual.
+[profile.release.build-override]
+strip = false

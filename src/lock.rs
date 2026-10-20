@@ -67,6 +67,34 @@ pub fn daemon_status() -> Result<Option<Option<u32>>> {
     }
 }
 
+/// Polls until the daemon lock is free (`true`) or `timeout` passes.
+pub fn wait_until_stopped(timeout: std::time::Duration) -> Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if daemon_status()?.is_none() {
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Polls until some daemon holds the lock; returns its pid if known.
+pub fn wait_until_running(timeout: std::time::Duration) -> Result<Option<Option<u32>>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(pid) = daemon_status()? {
+            return Ok(Some(pid));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn acquire_in(dir: &Path) -> Result<DaemonLock> {
     let lock_path = dir.join("watch.lock");
     let pid_path = dir.join("watch.pid");

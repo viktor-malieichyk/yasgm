@@ -28,3 +28,11 @@ winreg = "0.56.0"
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tao = "0.35.3"
 tray-icon = "0.24.1"
+
+# Proc-macro dylibs are built with the build-override profile. Stripping them
+# (release default: strip = "debuginfo") with Xcode 27's `strip` leaves a
+# "mis-aligned LINKEDIT string pool" that dyld refuses to load, failing the
+# build with "can't find crate for `<x>_macros`". Shipped binaries are still
+# stripped as usual.
+[profile.release.build-override]
+strip = false

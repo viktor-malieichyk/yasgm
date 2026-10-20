@@ -52,12 +52,16 @@ fn token_path() -> Result<PathBuf> {
 
 pub fn save_tokens(tokens: &Tokens) -> Result<()> {
     let path = token_path()?;
-    fs::write(&path, serde_json::to_vec_pretty(tokens)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
+    // 0600 is applied to the temp file before the rename, so the token file
+    // is never briefly readable by others.
+    crate::fsutil::write_atomic_with(&path, &serde_json::to_vec_pretty(tokens)?, |_tmp| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(_tmp, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 

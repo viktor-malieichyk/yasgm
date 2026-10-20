@@ -4,6 +4,7 @@
 
 mod autostart;
 mod config;
+mod fsutil;
 mod local;
 mod lock;
 mod manifest;
@@ -671,8 +672,15 @@ enum WatchCommand {
 
 /// Daemon entry: headless by default, `--tray` adds a status icon with
 /// Sync now / Pause / Quit (Windows + macOS; Linux tray pending).
-/// `watch status [--json]` reports whether a daemon is running instead.
+/// `watch status [--json]` reports whether a daemon is running instead;
+/// `watch stop` / `watch start` stop it or launch it detached (used by the
+/// GUI around self-updates, D20, and to restore it afterwards).
 fn watch_cmd(args: &[String]) -> Result<()> {
+    match positionals(args).first().map(String::as_str) {
+        Some("stop") => return watch_stop(args),
+        Some("start") => return watch_start(args),
+        _ => {}
+    }
     if positionals(args).first().map(String::as_str) == Some("status") {
         let running = lock::daemon_status()?;
         if flag(args, "--json") {
@@ -709,6 +717,89 @@ fn watch_cmd(args: &[String]) -> Result<()> {
         eprintln!("tray is not supported on this OS yet; running headless watch");
     }
     watch_loop(settle, None, None)
+}
+
+/// Terminates the running daemon (if any) and waits for its lock to free.
+/// The daemon has no graceful-shutdown channel yet (planned with the Decky
+/// control channel), so this is a plain terminate; that's safe because
+/// every local state write is atomic (fsutil) and cloud versions are
+/// written before their index entry.
+fn watch_stop(args: &[String]) -> Result<()> {
+    let was_running = lock::daemon_status()?;
+    if let Some(pid) = was_running {
+        let pid = pid.context("daemon is running but its pid is unknown (watch.pid missing)")?;
+        terminate(pid, false);
+        if !lock::wait_until_stopped(std::time::Duration::from_secs(10))? {
+            terminate(pid, true);
+            anyhow::ensure!(
+                lock::wait_until_stopped(std::time::Duration::from_secs(5))?,
+                "watch daemon (pid {pid}) did not stop"
+            );
+        }
+    }
+    if flag(args, "--json") {
+        println!("{}", serde_json::json!({"was_running": was_running.is_some()}));
+    } else if was_running.is_some() {
+        println!("watch daemon stopped");
+    } else {
+        println!("watch daemon was not running");
+    }
+    Ok(())
+}
+
+fn terminate(pid: u32, force: bool) {
+    #[cfg(unix)]
+    let result = std::process::Command::new("kill")
+        .args([if force { "-KILL" } else { "-TERM" }, &pid.to_string()])
+        .output();
+    #[cfg(windows)]
+    let result = {
+        let _ = force; // no graceful signal for a windowless process on Windows
+        std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output()
+    };
+    if let Err(err) = result {
+        eprintln!("could not signal pid {pid}: {err}");
+    }
+}
+
+/// Launches `watch` (with the tray where supported) as a detached process
+/// and waits until it holds the daemon lock. No-op if one already runs.
+fn watch_start(args: &[String]) -> Result<()> {
+    let pid = match lock::daemon_status()? {
+        Some(pid) => pid,
+        None => {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command.arg("watch");
+            #[cfg(any(windows, target_os = "macos"))]
+            command.arg("--tray");
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(unix)]
+            {
+                // Own process group: not torn down with whoever launched us.
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+            }
+            command.spawn().context("launching watch daemon")?;
+            lock::wait_until_running(std::time::Duration::from_secs(10))?
+                .context("watch daemon did not start within 10 s")?
+        }
+    };
+    if flag(args, "--json") {
+        println!("{}", serde_json::json!({"running": true, "pid": pid}));
+    } else {
+        println!("watch daemon running{}", pid.map(|p| format!(" (pid {p})")).unwrap_or_default());
+    }
+    Ok(())
 }
 
 /// FS-watch save dirs, debounce, and sync when a game's saves settle and the
@@ -1411,7 +1502,7 @@ fn main() -> Result<()> {
                 "unknown command {other:?}\navailable:\n  \
                  doctor\n  auth [--device]\n  status\n  \
                  sync [appid] [--dry-run]\n  run [--app <appid>] -- <game command...>\n  \
-                 watch [--settle <secs>] [--tray] | watch status [--json]\n  autostart [on|off|status] [--json]\n  \
+                 watch [--settle <secs>] [--tray] | watch status|start|stop [--json]\n  autostart [on|off|status] [--json]\n  \
                  provider [onedrive|local <path>|status] [--json]\n  \
                  paths <appid>\n  backup-location <appid>\n  \
                  pending-location <appid>\n  \
