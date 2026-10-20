@@ -156,12 +156,21 @@ to land upstream:
 - **New game name** → inserted outright, and joins the normal Steam-AppID
   merge pool (so it behaves exactly like any other manifest entry from that
   point on).
-- **Existing game name** → deep-merged into the community entry: `files`
-  unioned per template (the override's rule wins if the exact same template
-  string collides), `steam`/`cloud` replaced only if the override sets them.
-  This can *add or fix* a path but can't *remove* a bad one from the
-  community manifest — acceptable for the gaps seen so far, but a known
-  limitation.
+- **Existing game name** → its `files` **replace** the community entry's
+  save rules (changed 2026-10-20 from a union, so a wrong upstream path can
+  be removed, not just supplemented); `steam`/`cloud` replaced only if the
+  override sets them. Other community entries sharing the same AppID are
+  untouched.
+- **Entry with empty `files`** (`files: {}`) → ignored entirely. That's the
+  placeholder state of the generated skeleton:
+  `yasgm manifest-gaps --skeleton` prints one entry per game whose save
+  locations can't be mapped across OSes, with the community locations and
+  the unmappable OS pairs as comments, plus a header explaining the
+  format, the placeholders and a filled example. Written to the dev Mac's
+  `~/Library/Application Support/yasgm/ludusavi.yaml` (38 games) on
+  2026-10-20 for manual fixing; verified that a filled entry (Barony)
+  replaced the community rules and left the gap list, and that unfilled
+  entries change nothing.
 
 Absent by default (not an error); `doctor` hints at the file's path when an
 installed game isn't in the manifest at all.

@@ -88,18 +88,22 @@ fn load_local_overrides() -> Result<Manifest> {
     }
 }
 
-/// Merge local overrides into the downloaded manifest. A name matching an
-/// existing entry deep-merges (files unioned per template, with the
-/// override's rule winning on a template collision; steam/cloud metadata
-/// replaced only when the override sets it) — the same "supplement, don't
-/// silently clobber" approach `Ctx::merged_game` already uses for entries
-/// that share a Steam AppID under different names. A new name is just
-/// inserted, and joins that AppID pool normally via `steam_index`.
+/// Merge local overrides into the downloaded manifest. An entry with no
+/// `files` is ignored entirely — that's a placeholder (`files: {}`) from
+/// the generated skeleton (`manifest-gaps --skeleton`) until someone fills
+/// it in. A filled entry *replaces* the community entry's save rules, so a
+/// wrong upstream path can be removed, not just supplemented;
+/// `steam`/`cloud` are replaced only when the override sets them. A new
+/// name is inserted and joins its AppID pool normally via `steam_index`
+/// (other community entries sharing that AppID are left as they are).
 fn merge_manifest(base: &mut Manifest, overrides: Manifest) {
     for (name, over) in overrides {
+        if over.files.is_empty() {
+            continue;
+        }
         match base.get_mut(&name) {
             Some(existing) => {
-                existing.files.extend(over.files);
+                existing.files = over.files;
                 if over.steam.is_some() {
                     existing.steam = over.steam;
                 }
@@ -215,14 +219,24 @@ mod tests {
     }
 
     #[test]
-    fn matching_name_unions_files_instead_of_replacing() {
+    fn filled_entry_replaces_the_community_rules() {
         let mut base: Manifest = [("Known Game".to_owned(), game(&["<home>/original"]))].into();
-        let overrides: Manifest = [("Known Game".to_owned(), game(&["<home>/extra"]))].into();
+        let overrides: Manifest = [("Known Game".to_owned(), game(&["<home>/fixed"]))].into();
         merge_manifest(&mut base, overrides);
         assert_eq!(base.len(), 1, "must not create a duplicate entry");
         let files = &base["Known Game"].files;
-        assert!(files.contains_key("<home>/original"), "existing rule must survive the merge");
-        assert!(files.contains_key("<home>/extra"), "override's rule must be added");
+        assert!(files.contains_key("<home>/fixed"));
+        assert!(!files.contains_key("<home>/original"), "a filled override replaces upstream rules");
+    }
+
+    #[test]
+    fn unfilled_skeleton_entries_are_ignored() {
+        let yaml = "\"Known Game\":\n  files: {}\n\"New Game\":\n  files: {}\n";
+        let overrides: Manifest = serde_yaml::from_str(yaml).unwrap();
+        let mut base: Manifest = [("Known Game".to_owned(), game(&["<home>/original"]))].into();
+        merge_manifest(&mut base, overrides);
+        assert_eq!(base.len(), 1, "an empty new entry must not be inserted");
+        assert!(base["Known Game"].files.contains_key("<home>/original"), "an empty entry must not wipe rules");
     }
 
     #[test]

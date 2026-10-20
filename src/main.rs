@@ -294,8 +294,101 @@ fn cross_os_note(files: &HashMap<String, manifest::FileRule>, os: Os) -> Option<
     (!parts.is_empty()).then(|| format!("{} — its save locations don't match between these systems", parts.join("; ")))
 }
 
-/// `manifest-gaps [--json]` (dev): every Steam game in the manifest whose
-/// save rules can't be mapped between two OSes by `resolve::restore_target`.
+const SKELETON_HEADER: &str = r#"# YASGM local manifest overrides (D7)
+#
+# Same format as the community Ludusavi manifest (game name → files).
+# YASGM reads this file on every run and merges it over the community data:
+#
+#   * An entry whose `files` is empty (`files: {}`) is IGNORED. That's how
+#     every game below starts; nothing changes until you fill one in.
+#   * A filled entry REPLACES all of that game's save rules from the
+#     community manifest (it doesn't add to them), so list every location
+#     the game uses, on every OS you care about.
+#   * A game name that isn't in the community manifest is added as a new game
+#     (then also give `steam: {id: <appid>}` so YASGM can find it).
+#
+# The games below are the ones whose community save locations can't be
+# matched between operating systems, so a backup made on one OS can't be
+# restored on another. Each has its current community locations in comments.
+# For cross-OS restore to work, name the same game folder after each OS's
+# base directory, e.g. `<winAppData>/Game/Saves` and `<xdgData>/Game/Saves`.
+#
+# Rule format:
+#   <path template>:
+#     tags: [save]          # omit tags = treated as save data too
+#     when: [{os: windows}] # windows | mac | linux; omit `when` = every OS
+#
+# Placeholders:
+#   <base>                 the game's install folder (steamapps/common/<game>)
+#   <root>                 the Steam library folder
+#   <home>                 your home folder
+#   <storeUserId>          your Steam user id (matches any id)
+#   <winAppData>           Windows %APPDATA%  (…\AppData\Roaming)
+#   <winLocalAppData>      Windows %LOCALAPPDATA%  (…\AppData\Local)
+#   <winLocalAppDataLow>   Windows …\AppData\LocalLow
+#   <winDocuments>         Windows Documents
+#   <xdgData>              Linux ~/.local/share
+#   <xdgConfig>            Linux ~/.config
+#   macOS has no placeholder of its own: use <home>/Library/Application Support/…
+#   Windows paths also apply on SteamOS/Linux inside the game's Proton prefix.
+#
+# Example of a filled entry:
+#
+# "Some Game":
+#   files:
+#     <winAppData>/Some Game/Saves:
+#       tags: [save]
+#       when: [{os: windows}]
+#     <home>/Library/Application Support/Some Game/Saves:
+#       tags: [save]
+#       when: [{os: mac}]
+#     <xdgData>/Some Game/Saves:
+#       tags: [save]
+#       when: [{os: linux}]
+#
+# Regenerate this list (without overwriting your file):
+#   yasgm manifest-gaps --skeleton > ludusavi.new.yaml
+"#;
+
+/// YAML skeleton for the local manifest: one ignored placeholder entry per
+/// game, with its current save locations and unmappable OS pairs as
+/// comments (see `SKELETON_HEADER`).
+fn gap_skeleton(rows: &[(&String, u64, Vec<(Os, Os)>)], manifest: &manifest::Manifest) -> String {
+    let mut out = String::from(SKELETON_HEADER);
+    for (name, id, gaps) in rows {
+        let pairs: Vec<_> = gaps.iter().map(|(f, t)| format!("{}→{}", f.label(), t.label())).collect();
+        out.push_str(&format!("\n# {}\n# {name} (Steam {id})\n", "-".repeat(75)));
+        out.push_str(&format!("# Can't restore: {}\n", pairs.join(", ")));
+        out.push_str("# Community save locations:\n");
+        let mut rules: Vec<(String, &String)> = manifest[*name]
+            .files
+            .iter()
+            .filter(|(_, r)| r.is_save())
+            .map(|(t, r)| {
+                let mut oss: Vec<&str> = r.when.iter().filter_map(|c| c.os.as_deref()).collect();
+                oss.sort();
+                oss.dedup();
+                let stores: Vec<&str> = r.when.iter().filter_map(|c| c.store.as_deref()).filter(|s| *s != "steam").collect();
+                let mut label = if oss.is_empty() { "any OS".to_owned() } else { oss.join(",") };
+                if !stores.is_empty() {
+                    label.push_str(&format!(" ({} store, ignored)", stores.join(",")));
+                }
+                (label, t)
+            })
+            .collect();
+        rules.sort();
+        for (label, template) in rules {
+            out.push_str(&format!("#   {label:<14} {template}\n"));
+        }
+        out.push_str(&format!("\"{}\":\n  files: {{}}\n", name.replace('\\', "\\\\").replace('"', "\\\"")));
+    }
+    out
+}
+
+/// `manifest-gaps [--json|--explain|--skeleton]` (dev): every Steam game in
+/// the manifest whose save rules can't be mapped between two OSes by
+/// `resolve::restore_target`; `--skeleton` prints a local-manifest
+/// skeleton for them.
 fn manifest_gaps_cmd(args: &[String]) -> Result<()> {
     let manifest = manifest::load()?;
     if flag(args, "--explain") {
@@ -321,6 +414,10 @@ fn manifest_gaps_cmd(args: &[String]) -> Result<()> {
         })
         .collect();
     rows.sort_by_key(|(name, ..)| name.to_lowercase());
+    if flag(args, "--skeleton") {
+        print!("{}", gap_skeleton(&rows, &manifest));
+        return Ok(());
+    }
     if flag(args, "--json") {
         let json: Vec<_> = rows
             .iter()
