@@ -1435,6 +1435,14 @@ and fast until the release is otherwise ready). Status is tracked inline.
    CLI-only change kept running the old daemon — `build-sidecar.sh` now
    refreshes that copy. GUI: the **Library** nav button is gone (picking a
    game already returns to the library); **Settings** toggles.
+   **Steam Cloud filter (2026-10-20).** `games`/`config --json` carry
+   `steam_cloud` (manifest flag or Steam's own `userdata` — independent of
+   the mode setting, so a manual override doesn't hide it). Sidebar: a switch
+   "Only without Steam Cloud" (persisted in localStorage) filters the list
+   (selection moves to the first visible game; a note if every game has
+   it), and with the filter off each Steam-Cloud game shows a small cloud
+   icon on its row (tooltip: Steam Cloud already syncs this game) while its
+   subtitle drops the now-redundant "· Steam Cloud".
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`

@@ -89,6 +89,12 @@ impl Ctx {
         merged.cloud_steam || steam::steam_cloud_active(&self.root, app_id)
     }
 
+    /// Does Steam itself already sync this game's saves (manifest flag or
+    /// Steam's own userdata)? Independent of the user's mode setting.
+    fn has_steam_cloud(&self, app_id: u64) -> bool {
+        self.merged_game(app_id).is_some_and(|m| m.cloud_steam) || steam::steam_cloud_active(&self.root, app_id)
+    }
+
     fn cloud_store(&self) -> Result<Store> {
         build_store(self.account.clone(), &config::Config::load())
     }
@@ -1915,6 +1921,7 @@ fn config_cmd(args: &[String]) -> Result<()> {
                     "keep": game_cfg.keep,
                     "default_keep": store::DEFAULT_KEEP,
                     "in_manifest": ctx.merged_game(game.app_id).is_some(),
+                    "steam_cloud": ctx.has_steam_cloud(game.app_id),
                     "cross_os_note": ctx.merged_game(game.app_id).and_then(|m| cross_os_note(&m.files, ctx.os)),
                     "last_version": state.get(&ctx.account, game.app_id).map(|s| s.last_version.clone()),
                     "synced_at": state.get(&ctx.account, game.app_id).map(|s| s.synced_at),

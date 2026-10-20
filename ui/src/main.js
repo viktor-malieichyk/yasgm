@@ -2,6 +2,7 @@ const { invoke } = window.__TAURI__.core;
 
 const MODES = ["auto", "sync", "backup", "off"];
 const THEME_KEY = "yasgm-theme";
+const NO_CLOUD_KEY = "yasgm-only-no-steam-cloud";
 const AUTO_UPDATE_KEY = "yasgm-auto-update";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -41,6 +42,15 @@ let updateMsgEl;
 
 let games = [];
 let selectedAppId = null;
+// Sidebar filter: hide games Steam Cloud already syncs.
+let onlyNoCloud = false;
+
+const CLOUD_ICON =
+  '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 15.5a3.8 3.8 0 0 1-.4-7.58A5 5 0 0 1 15 7a3.6 3.6 0 0 1 .3 8.5H6z" /></svg>';
+
+function visibleGames() {
+  return onlyNoCloud ? games.filter((g) => !g.steam_cloud) : games;
+}
 // appid → data: URL of the game's icon (see loadIcons).
 let icons = {};
 
@@ -121,14 +131,25 @@ async function loadGames() {
     return;
   }
   renderGamesList();
-  if (selectedAppId === null && games.length > 0) {
-    selectGame(games[0].app_id);
-  } else if (selectedAppId !== null && games.some((g) => g.app_id === selectedAppId)) {
+  const shown = visibleGames();
+  if (selectedAppId === null && shown.length > 0) {
+    selectGame(shown[0].app_id);
+  } else if (selectedAppId !== null && shown.some((g) => g.app_id === selectedAppId)) {
     renderDetailSettings();
+  } else if (shown.length > 0) {
+    selectGame(shown[0].app_id);
   } else {
     selectedAppId = null;
     showEmptyDetail();
   }
+}
+
+function setOnlyNoCloud(value) {
+  onlyNoCloud = value;
+  try {
+    localStorage.setItem(NO_CLOUD_KEY, value ? "1" : "0");
+  } catch {}
+  loadGames();
 }
 
 // Icons come in two passes: Steam's local cache first (instant), then a
@@ -157,7 +178,9 @@ function shortMode(g) {
   if (!m) return g.effective_mode;
   const mode = m[1].replace("-", " ");
   const label = mode[0].toUpperCase() + mode.slice(1);
-  const why = m[2] === "override" ? "set manually" : (m[2] || "").replace(/^auto:?\s*/, "");
+  let why = m[2] === "override" ? "set manually" : (m[2] || "").replace(/^auto:?\s*/, "");
+  // The cloud badge on the row already says it.
+  if (g.steam_cloud && why === "Steam Cloud") why = "";
   return why ? `${label} · ${why}` : label;
 }
 
@@ -178,7 +201,13 @@ function gameIcon(g, large = false) {
 
 function renderGamesList() {
   gamesListEl.innerHTML = "";
-  for (const g of games) {
+  if (onlyNoCloud && visibleGames().length === 0 && games.length > 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted list-empty";
+    empty.textContent = "Every installed game uses Steam Cloud.";
+    gamesListEl.appendChild(empty);
+  }
+  for (const g of visibleGames()) {
     const item = document.createElement("button");
     item.type = "button";
     item.className =
@@ -194,6 +223,13 @@ function renderGamesList() {
     sub.textContent = shortMode(g);
     text.append(name, sub);
     item.append(gameIcon(g), text);
+    if (g.steam_cloud) {
+      const cloud = document.createElement("span");
+      cloud.className = "cloud-badge";
+      cloud.title = "Steam Cloud already syncs this game";
+      cloud.innerHTML = CLOUD_ICON;
+      item.append(cloud);
+    }
     item.addEventListener("click", () => {
       showView("library");
       selectGame(g.app_id);
@@ -807,6 +843,13 @@ window.addEventListener("DOMContentLoaded", () => {
       localStorage.setItem(AUTO_UPDATE_KEY, updateAutoToggleEl.checked ? "on" : "off");
     } catch {}
   });
+
+  try {
+    onlyNoCloud = localStorage.getItem(NO_CLOUD_KEY) === "1";
+  } catch {}
+  const noCloudToggle = document.querySelector("#filter-no-cloud");
+  noCloudToggle.checked = onlyNoCloud;
+  noCloudToggle.addEventListener("change", () => setOnlyNoCloud(noCloudToggle.checked));
 
   loadTheme();
   loadAccentColor();
