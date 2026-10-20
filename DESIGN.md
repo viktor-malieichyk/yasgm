@@ -46,6 +46,17 @@ Steam games only; no Proton/CrossOver on Mac in scope).
 - **macOS signing credentials (D16)** — owner obtains Developer ID
   certificate + notarization API key.
 
+## Deferred follow-ups (do later, not scheduled)
+
+- **Stale local files after a download (found 2026-10-20).** Restore and
+  download never delete local files (D14), so a file that exists only on
+  this machine survives a download; local then differs from the downloaded
+  head and the next sync uploads it as one extra version. No data loss.
+  Fix: after a download, delete files the previous synced version had that
+  the downloaded one doesn't (the current state is preserved as a pinned
+  version first, so it stays recoverable). Needs the previous version's
+  file list; decide whether to do it for restore too or only for sync.
+
 ## Research summary (2026-07-17)
 
 ### Existing tools and how they solved configuration
