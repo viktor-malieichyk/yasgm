@@ -10,6 +10,7 @@ let detailEmptyEl;
 let detailContentEl;
 let detailTitleEl;
 let detailAppIdEl;
+let detailWarningEl;
 let modeSelectEl;
 let keepInputEl;
 let saveBtnEl;
@@ -243,6 +244,10 @@ function renderDetailSettings() {
   detailTitleEl.textContent = g.game;
   renderDetailIcon();
   detailAppIdEl.textContent = `AppID ${g.app_id} · ${g.effective_mode}`;
+  // Set by the CLI when this game's save locations can't be mapped between
+  // this OS and another (see resolve::cross_os_gaps).
+  detailWarningEl.textContent = g.cross_os_note ? `Cross-platform restore: ${g.cross_os_note}.` : "";
+  detailWarningEl.classList.toggle("hidden", !g.cross_os_note);
 
   modeSelectEl.innerHTML = "";
   for (const m of MODES) {
@@ -634,6 +639,7 @@ window.addEventListener("DOMContentLoaded", () => {
   detailContentEl = document.querySelector("#detail-content");
   detailTitleEl = document.querySelector("#detail-title");
   detailAppIdEl = document.querySelector("#detail-appid");
+  detailWarningEl = document.querySelector("#detail-warning");
   modeSelectEl = document.querySelector("#mode-select");
   keepInputEl = document.querySelector("#keep-input");
   saveBtnEl = document.querySelector("#save-btn");

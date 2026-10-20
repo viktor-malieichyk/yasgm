@@ -88,7 +88,7 @@ pub fn sync_game(
                 return Ok((Outcome::DryRun("would download head (no local data)"), None));
             }
             let bytes = store.download_version(game.app_id, &head)?;
-            let files_written = snapshot::extract(&bytes, &head.mounts, files, os, game, false)?;
+            let files_written = snapshot::extract(&bytes, &head.mounts, files, os, Os::from_name(&head.os), game, false)?;
             let update = Some((head.id.clone(), head.content_hash.clone()));
             Ok((
                 Outcome::Downloaded { version: head, files_written, local_preserved_as: None },
@@ -129,7 +129,7 @@ pub fn sync_game(
                     Some(v.id)
                 };
                 let bytes = store.download_version(game.app_id, &head)?;
-                let files_written = snapshot::extract(&bytes, &head.mounts, files, os, game, false)?;
+                let files_written = snapshot::extract(&bytes, &head.mounts, files, os, Os::from_name(&head.os), game, false)?;
                 let update = Some((head.id.clone(), head.content_hash.clone()));
                 return Ok((
                     Outcome::Downloaded {

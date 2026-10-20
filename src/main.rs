@@ -252,6 +252,9 @@ fn doctor() -> Result<()> {
             },
         };
         println!("{} ({}) — {}", game.name, game.app_id, mode_label);
+        if let Some(note) = entry.as_ref().and_then(|m| cross_os_note(&m.files, os)) {
+            println!("    ⚠ cross-OS: {note}");
+        }
         for line in &lines {
             println!("{line}");
         }
@@ -272,6 +275,82 @@ fn doctor() -> Result<()> {
             manifest::local_manifest_path()?.display()
         );
     }
+    Ok(())
+}
+
+/// Plain-language note on the cross-OS restores this game can't do that
+/// involve `os` (see `resolve::cross_os_gaps`), or `None` if there are none.
+fn cross_os_note(files: &HashMap<String, manifest::FileRule>, os: Os) -> Option<String> {
+    let gaps = resolve::cross_os_gaps(files);
+    let into_here: Vec<_> = gaps.iter().filter(|(_, to)| *to == os).map(|(from, _)| from.label()).collect();
+    let from_here: Vec<_> = gaps.iter().filter(|(from, _)| *from == os).map(|(_, to)| to.label()).collect();
+    let mut parts = Vec::new();
+    if !into_here.is_empty() {
+        parts.push(format!("backups made on {} can't be restored here", into_here.join(" or ")));
+    }
+    if !from_here.is_empty() {
+        parts.push(format!("backups made here can't be restored on {}", from_here.join(" or ")));
+    }
+    (!parts.is_empty()).then(|| format!("{} — its save locations don't match between these systems", parts.join("; ")))
+}
+
+/// `manifest-gaps [--json]` (dev): every Steam game in the manifest whose
+/// save rules can't be mapped between two OSes by `resolve::restore_target`.
+fn manifest_gaps_cmd(args: &[String]) -> Result<()> {
+    let manifest = manifest::load()?;
+    if flag(args, "--explain") {
+        let mut names: Vec<&String> = manifest.keys().collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        for name in names {
+            let game = &manifest[name];
+            if game.steam.as_ref().and_then(|s| s.id).is_none() {
+                continue;
+            }
+            for (from, to, src, dst, tier) in resolve::explain_matches(&game.files) {
+                println!("{tier}\t{name}\t{}→{}\t{src}\t{dst}", from.name(), to.name());
+            }
+        }
+        return Ok(());
+    }
+    let mut rows: Vec<(&String, u64, Vec<(Os, Os)>)> = manifest
+        .iter()
+        .filter_map(|(name, game)| {
+            let id = game.steam.as_ref()?.id?;
+            let gaps = resolve::cross_os_gaps(&game.files);
+            (!gaps.is_empty()).then_some((name, id, gaps))
+        })
+        .collect();
+    rows.sort_by_key(|(name, ..)| name.to_lowercase());
+    if flag(args, "--json") {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|(name, id, gaps)| {
+                serde_json::json!({
+                    "game": name,
+                    "app_id": id,
+                    "gaps": gaps.iter().map(|(f, t)| format!("{}->{}", f.name(), t.name())).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+    for (name, id, gaps) in &rows {
+        let pairs: Vec<_> = gaps.iter().map(|(f, t)| format!("{}→{}", f.label(), t.label())).collect();
+        println!("{name} ({id}): {}", pairs.join(", "));
+    }
+    let multi_os = manifest
+        .values()
+        .filter(|g| g.steam.as_ref().and_then(|s| s.id).is_some())
+        .filter(|g| {
+            [Os::Windows, Os::Mac, Os::Linux]
+                .iter()
+                .filter(|os| g.files.values().any(|r| r.is_save() && r.when.iter().any(|c| c.os.as_deref() == Some(os.name()))))
+                .count()
+                >= 2
+        })
+        .count();
+    println!("\n{} of {multi_os} Steam games with saves on 2+ OSes have an OS pair that can't be mapped", rows.len());
     Ok(())
 }
 
@@ -1191,7 +1270,19 @@ fn restore_cmd(args: &[String]) -> Result<()> {
 
     let bytes = store.download_version(app_id, &version)?;
     let files = ctx.merged_game(app_id).map(|m| m.files).unwrap_or_default();
-    let written = snapshot::extract(&bytes, &version.mounts, &files, ctx.os, game, dry_run)?;
+    if let Some(from) = Os::from_name(&version.os).filter(|from| *from != ctx.os) {
+        if resolve::cross_os_gaps(&files).contains(&(from, ctx.os)) {
+            eprintln!(
+                "warning: {} was made on {}, and this game's save locations on {} and {} don't match — \
+                 its files will likely be skipped",
+                version.id,
+                from.label(),
+                from.label(),
+                ctx.os.label()
+            );
+        }
+    }
+    let written = snapshot::extract(&bytes, &version.mounts, &files, ctx.os, Os::from_name(&version.os), game, dry_run)?;
     if dry_run {
         println!("dry run: {written} files would be restored from {}", version.id);
         return Ok(());
@@ -1258,6 +1349,7 @@ fn config_cmd(args: &[String]) -> Result<()> {
                     "keep": game_cfg.keep,
                     "default_keep": store::DEFAULT_KEEP,
                     "in_manifest": ctx.merged_game(game.app_id).is_some(),
+                    "cross_os_note": ctx.merged_game(game.app_id).and_then(|m| cross_os_note(&m.files, ctx.os)),
                 }));
                 continue;
             }
@@ -1431,7 +1523,7 @@ fn selftest() -> Result<()> {
     let head = Store::head(&index).context("no head")?.clone();
     ensure!(head.id == second.id, "head is not the second version");
     let bytes = store.download_version(game.app_id, &head)?;
-    let written = snapshot::extract(&bytes, &head.mounts, &files, os, &game, false)?;
+    let written = snapshot::extract(&bytes, &head.mounts, &files, os, Some(os), &game, false)?;
     ensure!(written == 2, "expected 2 restored files, wrote {written}");
 
     println!("6/7 verify contents…");
@@ -1541,6 +1633,7 @@ fn main() -> Result<()> {
         Some("restore") => restore_cmd(&args),
         Some("config") => config_cmd(&args),
         Some("icons") => icons_cmd(&args),
+        Some("manifest-gaps") => manifest_gaps_cmd(&args),
         Some("pin") => pin_cmd(&args, true),
         Some("unpin") => pin_cmd(&args, false),
         Some("rm") => rm_cmd(&args),

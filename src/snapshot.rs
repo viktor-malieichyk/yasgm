@@ -187,8 +187,8 @@ pub fn capture(
 /// snapshot contains (callers snapshot current state first — D14).
 ///
 /// Each mount goes where `resolve::restore_target` says, which maps a
-/// location captured on another OS to this OS's rule for it (`files` is the
-/// game's current manifest rules). A mount with no counterpart here (e.g. a
+/// location captured on another OS (`from_os`, the version's OS) to this
+/// OS's rule for it (`files` is the game's current manifest rules). A mount with no counterpart here (e.g. a
 /// Linux-only location restored on Windows) is expected for cross-OS
 /// restores, not a fatal error, so it's skipped rather than aborting.
 pub fn extract(
@@ -196,13 +196,14 @@ pub fn extract(
     mounts: &[Mount],
     files: &HashMap<String, FileRule>,
     os: Os,
+    from_os: Option<Os>,
     game: &InstalledGame,
     dry_run: bool,
 ) -> Result<u64> {
     let mut archive = ZipArchive::new(io::Cursor::new(zip_bytes))?;
     let mut written = 0u64;
     let mut skipped_mounts: HashSet<String> = HashSet::new();
-    let mut targets: HashMap<String, Option<String>> = HashMap::new();
+    let mut targets: HashMap<String, Option<resolve::RestoreTarget>> = HashMap::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         if entry.is_dir() {
@@ -220,39 +221,25 @@ pub fn extract(
             .find(|m| m.mount == mount_id)
             .with_context(|| format!("snapshot references unknown mount {mount_id}"))?;
 
-        let target = targets.entry(mount_id.to_owned()).or_insert_with(|| {
-            let found = resolve::restore_target(&mount.template, files, os, game);
-            if let Some((template, _)) = &found {
-                if *template != mount.template {
-                    eprintln!("  {mount_id}: {} → {template} on this OS", mount.template);
-                }
+        let found = targets.entry(mount_id.to_owned()).or_insert_with(|| {
+            let found = resolve::restore_target(&mount.template, files, os, from_os, game);
+            if let Some(t) = found.as_ref().filter(|t| t.remapped) {
+                eprintln!("  {mount_id}: {} → {} on this OS", mount.template, t.path);
             }
-            found.map(|(_, path)| path)
+            found
         });
-        let Some(resolved) = target.clone() else {
-            if skipped_mounts.insert(mount_id.to_owned()) {
-                eprintln!("  skipping {mount_id} — no save location on this OS matches {}", mount.template);
-            }
-            continue;
+        let target = match found {
+            None => Err(format!("no save location on this OS matches {}", mount.template)),
+            Some(target) => entry_target(mount, target, rel),
         };
-        let resolved = match (&mount.wildcard, resolved.contains('*')) {
-            (Some(value), true) => resolved.replace('*', value),
-            (None, true) => {
+        let target = match target {
+            Ok(target) => target,
+            Err(reason) => {
                 if skipped_mounts.insert(mount_id.to_owned()) {
-                    eprintln!(
-                        "  skipping {mount_id} — unresolved wildcard in {} (no recorded value)",
-                        mount.template
-                    );
+                    eprintln!("  skipping {mount_id} — {reason}");
                 }
                 continue;
             }
-            _ => resolved,
-        };
-
-        let target = if rel == FILE_SENTINEL {
-            PathBuf::from(&resolved)
-        } else {
-            Path::new(&resolved).join(rel)
         };
         if dry_run {
             println!("  would write {}", target.display());
@@ -269,9 +256,76 @@ pub fn extract(
     Ok(written)
 }
 
+/// Where one zip entry of `mount` goes, given the location chosen for it.
+/// `Err` is a reason to skip the mount.
+fn entry_target(mount: &Mount, target: &resolve::RestoreTarget, rel: &str) -> Result<PathBuf, String> {
+    let fill = |p: &str| -> Result<String, String> {
+        match (&mount.wildcard, p.contains('*')) {
+            (Some(value), true) => Ok(p.replace('*', value)),
+            (None, true) => Err(format!("unresolved wildcard in {} (no recorded value)", target.template)),
+            _ => Ok(p.to_owned()),
+        }
+    };
+    let path = target.path.as_str();
+    let parent = |p: &str| Path::new(p).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    // Remapped onto another OS's file pattern: restore into its directory.
+    let dir = if target.remapped && target.file_pattern { parent(path) } else { path.to_owned() };
+    if rel != FILE_SENTINEL {
+        return Ok(Path::new(&fill(&dir)?).join(rel));
+    }
+    if !target.remapped {
+        return Ok(PathBuf::from(fill(path)?));
+    }
+    // A single file remapped elsewhere keeps its own name.
+    let name = source_file_name(mount).ok_or_else(|| format!("can't tell the file name from {}", mount.template))?;
+    Ok(Path::new(&fill(&dir)?).join(name))
+}
+
+/// The captured file's name: its template's last segment with the recorded
+/// wildcard filled back in (`profile*.sav` + `1` → `profile1.sav`).
+fn source_file_name(mount: &Mount) -> Option<String> {
+    let last = mount.template.replace('\\', "/").rsplit('/').next()?.replace("<storeUserId>", "*");
+    if last.contains('<') || last.is_empty() {
+        return None;
+    }
+    match (&mount.wildcard, last.contains('*')) {
+        (Some(value), true) => Some(last.replacen('*', value, 1)).filter(|n| !n.contains('*')),
+        (None, true) => None,
+        _ => Some(last),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remapped_single_file_keeps_its_name_in_the_counterpart_directory() {
+        let target = |template: &str, path: &str, remapped: bool| resolve::RestoreTarget {
+            template: template.into(),
+            path: path.into(),
+            file_pattern: resolve::template_is_file(template),
+            remapped,
+        };
+        let mount = Mount {
+            mount: "p0".into(),
+            template: "<winDocuments>/My Games/Game/profile*.sav".into(),
+            wildcard: Some("1".into()),
+        };
+        // Counterpart is a directory: the file goes inside it.
+        let t = entry_target(&mount, &target("<xdgData>/Game", "/home/u/.local/share/Game", true), FILE_SENTINEL);
+        assert_eq!(t.unwrap(), PathBuf::from("/home/u/.local/share/Game/profile1.sav"));
+        // Counterpart is another file pattern: same name, in its directory.
+        let t = entry_target(&mount, &target("<xdgData>/Game/*.dat", "/home/u/.local/share/Game/*.dat", true), FILE_SENTINEL);
+        assert_eq!(t.unwrap(), PathBuf::from("/home/u/.local/share/Game/profile1.sav"));
+        // A directory remapped onto a file pattern goes into its directory.
+        let dir_mount = Mount { mount: "p1".into(), template: "<winAppData>/Game".into(), wildcard: None };
+        let t = entry_target(&dir_mount, &target("<xdgData>/Game/*.json", "/home/u/.local/share/Game/*.json", true), "a/b.json");
+        assert_eq!(t.unwrap(), PathBuf::from("/home/u/.local/share/Game/a/b.json"));
+        // Not remapped: the recorded wildcard fills the pattern as before.
+        let t = entry_target(&mount, &target(&mount.template.clone(), "C:/Docs/My Games/Game/profile*.sav", false), FILE_SENTINEL);
+        assert_eq!(t.unwrap(), PathBuf::from("C:/Docs/My Games/Game/profile1.sav"));
+    }
 
     #[test]
     fn wildcard_value_full_segment() {

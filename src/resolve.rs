@@ -25,6 +25,24 @@ impl Os {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<Os> {
+        match name {
+            "windows" => Some(Os::Windows),
+            "linux" => Some(Os::Linux),
+            "mac" => Some(Os::Mac),
+            _ => None,
+        }
+    }
+
+    /// For people: "Windows", "macOS", "Linux".
+    pub fn label(self) -> &'static str {
+        match self {
+            Os::Windows => "Windows",
+            Os::Linux => "Linux",
+            Os::Mac => "macOS",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Os::Windows => "windows",
@@ -207,91 +225,364 @@ pub fn resolve_template(template: &str, os: Os, game: &InstalledGame) -> Option<
     None
 }
 
-/// Base directories that differ per OS. What follows one is the
-/// OS-independent part of a save location, which is how a rule captured on
-/// one OS is matched to its counterpart on another, e.g. `baba_is_you` for
-/// both `<home>/Library/Application Support/Baba_Is_You` (mac) and
-/// `<xdgData>/Baba_Is_You` (linux). Longest prefixes first.
+// ---- cross-OS location matching -------------------------------------------
+//
+// A snapshot records the manifest template each mount was captured from.
+// Restoring it on another OS needs that OS's rule for the same saves. Rules
+// are compared by their *location*: the directory path after the OS's base
+// dir, with per-OS spellings normalized (see `location_parts`). Tiers, most
+// to least certain:
+//   1. same location
+//   2. nested: one is a subfolder of the other (`Terraria` vs
+//      `Terraria/Players`); restore adds or drops the extra folder level
+//   3. same last two folder names, or the same distinctive last name
+//      (`Supergiant Games/Hades` vs `Saved Games/Hades`)
+//   4. the game has exactly one save location on each side
+// Candidates are always the same game's rules, so a wrong guess picks the
+// wrong folder of that game at worst, and restore snapshots first (D14).
+
+/// Base directories that differ per OS. What follows the longest matching
+/// one is the OS-independent part of a save location, e.g. `Baba_Is_You`
+/// in both `<home>/Library/Application Support/Baba_Is_You` and
+/// `<xdgData>/Baba_Is_You`.
 const OS_BASE_DIRS: &[&str] = &[
     "<home>/Library/Application Support/",
     "<home>/Library/Preferences/",
     "<home>/Library/Caches/",
     "<home>/Library/Containers/",
-    "<home>/.local/share/",
-    "<home>/.config/",
-    "<home>/Documents/",
     "<home>/Library/",
+    "<home>/.local/share/",
+    "<home>/.config/unity3d/",
+    "<home>/.config/",
+    "<home>/Documents/My Games/",
+    "<home>/Documents/",
+    "<home>/Saved Games/",
+    "<home>/AppData/LocalLow/",
+    "<home>/AppData/Roaming/",
+    "<home>/AppData/Local/",
     "<home>/",
     "<xdgData>/",
+    "<xdgConfig>/unity3d/",
     "<xdgConfig>/",
+    "$XDG_DATA_HOME/",
+    "$XDG_CONFIG_HOME/",
     "<winLocalAppDataLow>/",
     "<winLocalAppData>/",
     "<winAppData>/",
+    "<winDocuments>/My Games/",
+    "<winDocuments>/Saved Games/",
     "<winDocuments>/",
     "<winPublic>/",
     "<winProgramData>/",
     "<winDir>/",
 ];
 
-/// OS-independent identity of a save location (see `OS_BASE_DIRS`); an
-/// OS-neutral template like `<base>/save` is its own key.
-fn location_key(template: &str) -> String {
+/// Folder names too common to identify a game's saves on their own
+/// (compared after `norm`).
+const GENERIC_DIRS: &[&str] = &[
+    "save", "saves", "savegame", "savegames", "savedata", "saved", "data", "userdata", "profiles", "profile", "config",
+    "settings", "local", "remote", "game", "games", "user", "users", "default",
+];
+
+/// Is the last path segment a file (pattern) rather than a directory?
+/// `*.sav`, `debug.celeste`, `settings.ini` are; `Baba_Is_You` isn't, nor
+/// macOS's dotted folder names like `com.RedCandleGames.NineSols` (only
+/// their `.plist` files are files).
+fn looks_like_file(segment: &str) -> bool {
+    let Some((stem, ext)) = segment.rsplit_once('.') else { return false };
+    if stem.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let lower = segment.to_lowercase();
+    if lower.starts_with("unity.") || lower.starts_with("com.") {
+        return ext.eq_ignore_ascii_case("plist");
+    }
+    (1..=8).contains(&ext.len())
+}
+
+pub fn template_is_file(template: &str) -> bool {
+    template.replace('\\', "/").rsplit('/').next().is_some_and(looks_like_file)
+}
+
+fn is_literal(segment: &str) -> bool {
+    !segment.contains(['<', '*', '?', '{'])
+}
+
+fn norm(segment: &str) -> String {
+    segment.chars().filter(|c| !matches!(c, ' ' | '_' | '-' | '.')).flat_map(char::to_lowercase).collect()
+}
+
+fn distinctive(segment: &str) -> bool {
+    let n = norm(segment);
+    is_literal(segment) && n.chars().count() >= 4 && !GENERIC_DIRS.contains(&n.as_str())
+}
+
+/// The OS-independent directory path of a save location, original case:
+/// base dir stripped, a trailing file pattern dropped (`Game/*.sav` is the
+/// `Game` location), a macOS app bundle's `X.app/Contents/Resources`
+/// dropped (≙ the install dir elsewhere), a leading dot dropped, and macOS's
+/// `unity.Company.Product` / `com.Company.Product` split into
+/// `Company/Product`.
+fn location_parts(template: &str) -> Vec<String> {
     let t = template.replace('\\', "/");
-    OS_BASE_DIRS
+    let lower = t.to_lowercase();
+    let rest = OS_BASE_DIRS
         .iter()
-        .find_map(|base| t.strip_prefix(base))
-        .unwrap_or(&t)
-        .trim_matches('/')
-        .to_lowercase()
+        .filter(|base| lower.starts_with(&base.to_lowercase()))
+        .max_by_key(|base| base.len())
+        .map_or(t.as_str(), |base| &t[base.len()..]);
+    let mut parts: Vec<String> = rest.split('/').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    if parts.last().is_some_and(|s| looks_like_file(s)) {
+        parts.pop();
+    }
+    if let Some(i) = parts.windows(3).position(|w| {
+        w[0].to_lowercase().ends_with(".app") && w[1].eq_ignore_ascii_case("contents") && w[2].eq_ignore_ascii_case("resources")
+    }) {
+        parts.drain(i..i + 3);
+    }
+    if let Some(first) = parts.first_mut() {
+        *first = first.trim_start_matches('.').to_owned();
+    }
+    if let Some(first) = parts.first().cloned() {
+        let lower = first.to_lowercase();
+        if let Some(prefix) = ["unity.", "com."].iter().find(|p| lower.starts_with(**p)) {
+            let split: Vec<String> = first[prefix.len()..].splitn(2, '.').map(str::to_owned).collect();
+            parts.splice(0..1, split);
+        }
+    }
+    parts.retain(|s| !s.is_empty());
+    parts
+}
+
+fn location_key(template: &str) -> String {
+    location_parts(template).join("/").to_lowercase()
+}
+
+fn same_parts(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_lowercase() == y.to_lowercase())
+}
+
+/// How a matched location's path changes for the mount being restored.
+#[derive(Debug, Clone, PartialEq)]
+enum Adjust {
+    Same,
+    /// The counterpart is a parent folder: go down into these subfolders.
+    Into(Vec<String>),
+    /// The counterpart is a subfolder: go up this many levels.
+    Up(usize),
+}
+
+/// Match tier (1 most certain) of a source location against a candidate,
+/// given how many distinct save locations each side's OS has (tier 4
+/// needs exactly one on both).
+fn match_location(src: &[String], dst: &[String], src_count: usize, dst_count: usize) -> Option<(u8, Adjust)> {
+    if same_parts(src, dst) {
+        return Some((1, Adjust::Same));
+    }
+    if !dst.is_empty() && dst.len() < src.len() && same_parts(&src[..dst.len()], dst) {
+        let extra = &src[dst.len()..];
+        if distinctive(&dst[dst.len() - 1]) && extra.iter().all(|s| is_literal(s)) {
+            return Some((2, Adjust::Into(extra.to_vec())));
+        }
+    }
+    if !src.is_empty() && src.len() < dst.len() && same_parts(&dst[..src.len()], src) && distinctive(&src[src.len() - 1]) {
+        return Some((2, Adjust::Up(dst.len() - src.len())));
+    }
+    let literal = |parts: &[String]| -> Vec<String> { parts.iter().filter(|s| is_literal(s)).map(|s| norm(s)).collect() };
+    match (literal(src).as_slice(), literal(dst).as_slice()) {
+        ([.., a1, a2], [.., b1, b2]) if a1 == b1 && a2 == b2 => return Some((3, Adjust::Same)),
+        ([.., a], [.., b]) if a == b && distinctive(a) => return Some((3, Adjust::Same)),
+        _ => {}
+    }
+    (src_count == 1 && dst_count == 1).then_some((4, Adjust::Same))
+}
+
+/// Is this rule tied to particular OSes (as opposed to OS-neutral)?
+fn os_specific(rule: &FileRule) -> bool {
+    rule.when.iter().any(|c| c.os.is_some())
+}
+
+/// The OS a rule is constrained to, if exactly one.
+fn rule_os(rule: &FileRule) -> Option<Os> {
+    let mut oss = rule.when.iter().filter_map(|c| Os::from_name(c.os.as_deref()?));
+    let first = oss.next()?;
+    oss.all(|o| o == first).then_some(first)
+}
+
+/// OS-specific Steam save rules that apply natively on `os`.
+fn save_rules_for(files: &HashMap<String, FileRule>, os: Os) -> Vec<&String> {
+    files
+        .iter()
+        .filter(|(_, r)| r.is_save() && os_specific(r) && applies_on(r, os))
+        .map(|(t, _)| t)
+        .collect()
+}
+
+fn distinct_locations<'a>(templates: impl IntoIterator<Item = &'a String>) -> usize {
+    templates.into_iter().map(|t| location_key(t)).collect::<std::collections::HashSet<_>>().len()
 }
 
 fn proton_prefix(game: &InstalledGame) -> PathBuf {
     game.library.join("steamapps/compatdata").join(game.app_id.to_string()).join("pfx")
 }
 
-/// Where to restore a snapshot mount captured from `template` on this
-/// machine: `(template used, concrete path, possibly with `*`)`.
+/// Where a snapshot mount goes on this machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoreTarget {
+    /// Manifest template of the chosen location.
+    pub template: String,
+    /// Concrete path, possibly with `*` (a recorded wildcard fills it).
+    pub path: String,
+    /// `path` is a file pattern (files land in its directory when remapped).
+    pub file_pattern: bool,
+    /// Location differs from the one the mount was captured from.
+    pub remapped: bool,
+}
+
+/// Where to restore a snapshot mount captured from `template` (on
+/// `from_os`, if known) on this machine.
 ///
 /// The mount's own rule is used as-is when it applies natively here (same
-/// OS, or OS-neutral like `<base>/save`). A rule from another OS is swapped
-/// for this OS's rule for the same location (same `location_key`) —
-/// otherwise a Mac `<home>/Library/Application Support/X` would be
-/// recreated verbatim under a Linux home. Among counterparts, one whose
-/// data (or Proton prefix) already exists wins, then native over Proton.
-/// `None` when this OS has no counterpart: skip, never guess a path.
+/// OS, or OS-neutral like `<base>/save`). Otherwise this OS's OS-specific
+/// rules are tried by tier (see above); Proton rules only count once the
+/// game has a prefix (it has been run under Proton). Within a tier, a
+/// candidate whose data already exists wins, then native over Proton.
+/// `None` when nothing matches: skip, never guess.
 pub fn restore_target(
     template: &str,
     files: &HashMap<String, FileRule>,
     os: Os,
+    from_os: Option<Os>,
     game: &InstalledGame,
-) -> Option<(String, String)> {
-    match files.get(template) {
-        Some(rule) if applies_on(rule, os) => {
-            return substitute(template, &native_vars(os, game)).map(|path| (template.to_owned(), path));
-        }
+) -> Option<RestoreTarget> {
+    let own = files.get(template);
+    let as_is = |path: String| RestoreTarget {
+        template: template.to_owned(),
+        path,
+        file_pattern: template_is_file(template),
+        remapped: false,
+    };
+    match own {
+        Some(rule) if applies_on(rule, os) => return substitute(template, &native_vars(os, game)).map(as_is),
         // Rule no longer in the manifest: re-resolve as-is, but only when
         // nothing OS-specific is involved.
-        None if location_key(template) == template.to_lowercase() => {
-            return resolve_template(template, os, game).map(|path| (template.to_owned(), path));
+        None if location_key(template) == template.trim_matches('/').to_lowercase() => {
+            return resolve_template(template, os, game).map(as_is);
         }
         _ => {}
     }
-    let key = location_key(template);
-    let mut candidates: Vec<(bool, bool, &String, String)> = files
+    let src = location_parts(template);
+    let src_count = from_os
+        .or_else(|| own.and_then(rule_os))
+        .map_or(0, |from| distinct_locations(save_rules_for(files, from)));
+    let has_prefix = proton_prefix(game).is_dir();
+    let candidates: Vec<(&String, Via, String)> = files
         .iter()
-        .filter(|(t, rule)| rule.is_save() && location_key(t) == key)
+        .filter(|(_, rule)| rule.is_save() && os_specific(rule))
         .filter_map(|(t, rule)| {
             let res = resolve_rule(t, rule, os, game)?;
-            let path = res.path?;
-            let on_disk = match res.via {
-                Via::Native => !existing_matches(&path).is_empty(),
-                Via::Proton => proton_prefix(game).is_dir(),
-            };
-            Some((on_disk, res.via == Via::Native, t, path))
+            (res.via == Via::Native || has_prefix).then_some((t, res.via, res.path?))
         })
         .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(b.2)));
-    candidates.into_iter().next().map(|(_, _, t, path)| (t.clone(), path))
+    let group_size = |via: Via| distinct_locations(candidates.iter().filter(|c| c.1 == via).map(|c| c.0));
+    let mut ranked: Vec<(u8, bool, bool, &String, String, Adjust)> = candidates
+        .iter()
+        .filter_map(|(t, via, path)| {
+            let (tier, adjust) = match_location(&src, &location_parts(t), src_count, group_size(*via))?;
+            // A prefix means the game runs under Proton: its Windows
+            // locations count as live even before any save exists.
+            let on_disk = match via {
+                Via::Native => !existing_matches(path).is_empty(),
+                Via::Proton => true,
+            };
+            Some((tier, !on_disk, *via != Via::Native, *t, path.clone(), adjust))
+        })
+        .collect();
+    ranked.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+    let (_, _, _, chosen, path, adjust) = ranked.into_iter().next()?;
+    let file_pattern = template_is_file(chosen);
+    Some(match adjust {
+        Adjust::Same => RestoreTarget { template: chosen.clone(), path, file_pattern, remapped: true },
+        Adjust::Into(_) | Adjust::Up(_) => {
+            let mut dir = PathBuf::from(&path);
+            if file_pattern {
+                dir.pop();
+            }
+            match &adjust {
+                Adjust::Into(extra) => extra.iter().for_each(|s| dir.push(s)),
+                Adjust::Up(levels) => (0..*levels).for_each(|_| {
+                    dir.pop();
+                }),
+                Adjust::Same => {}
+            }
+            RestoreTarget {
+                template: chosen.clone(),
+                path: dir.to_string_lossy().into_owned(),
+                file_pattern: false,
+                remapped: true,
+            }
+        }
+    })
+}
+
+/// Every `(from, to, source template, matched template, tier)` mapping
+/// between this game's OS-specific save rules (dev: `manifest-gaps
+/// --explain`, to review what the tiers pair up).
+pub fn explain_matches(files: &HashMap<String, FileRule>) -> Vec<(Os, Os, String, String, u8)> {
+    let all = [Os::Windows, Os::Mac, Os::Linux];
+    let mut out = Vec::new();
+    for from in all {
+        let src = save_rules_for(files, from);
+        for to in all {
+            let dst = save_rules_for(files, to);
+            if from == to || src.is_empty() || dst.is_empty() {
+                continue;
+            }
+            let (src_count, dst_count) = (distinct_locations(src.iter().copied()), distinct_locations(dst.iter().copied()));
+            for s in &src {
+                if dst.contains(s) {
+                    continue; // same rule on both OSes
+                }
+                let sp = location_parts(s);
+                let best = dst
+                    .iter()
+                    .filter_map(|d| Some((match_location(&sp, &location_parts(d), src_count, dst_count)?.0, *d)))
+                    .min();
+                if let Some((tier, d)) = best {
+                    out.push((from, to, (*s).clone(), d.clone(), tier));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// OS pairs `(from, to)` for which none of this game's save locations on
+/// `from` has a counterpart on `to`, i.e. a backup made on `from` can't be
+/// restored on `to`. Only OSes with their own (OS-specific) save rules are
+/// compared; Proton isn't considered (a Windows backup restores into a
+/// Proton prefix by its own Windows rule).
+pub fn cross_os_gaps(files: &HashMap<String, FileRule>) -> Vec<(Os, Os)> {
+    let all = [Os::Windows, Os::Mac, Os::Linux];
+    let mut gaps = Vec::new();
+    for from in all {
+        let src = save_rules_for(files, from);
+        for to in all {
+            let dst = save_rules_for(files, to);
+            if from == to || src.is_empty() || dst.is_empty() {
+                continue;
+            }
+            let (src_count, dst_count) = (distinct_locations(src.iter().copied()), distinct_locations(dst.iter().copied()));
+            let bridged = src.iter().any(|s| {
+                let sp = location_parts(s);
+                dst.iter().any(|d| match_location(&sp, &location_parts(d), src_count, dst_count).is_some())
+            });
+            if !bridged {
+                gaps.push((from, to));
+            }
+        }
+    }
+    gaps
 }
 
 /// Expand wildcards and check what actually exists on disk.
@@ -373,6 +664,10 @@ mod tests {
         }
     }
 
+    fn restore_pair(template: &str, files: &HashMap<String, FileRule>, os: Os, game: &InstalledGame) -> Option<(String, String)> {
+        restore_target(template, files, os, None, game).map(|t| (t.template, t.path))
+    }
+
     fn os_rule(os: &str) -> FileRule {
         FileRule {
             tags: vec!["save".to_owned()],
@@ -389,11 +684,204 @@ mod tests {
         ])
     }
 
+    fn rules(entries: &[(&str, &str)]) -> HashMap<String, FileRule> {
+        entries.iter().map(|(t, os)| (t.to_string(), os_rule(os))).collect()
+    }
+
+    fn target_on(template: &str, files: &HashMap<String, FileRule>, os: Os) -> Option<String> {
+        let game = fake_game(scratch_library("tiers"), 1);
+        restore_pair(template, files, os, &game).map(|(t, _)| t)
+    }
+
+    #[test]
+    fn tier1_matches_unity_locations_across_all_three_oses() {
+        let files = rules(&[
+            ("<home>/AppData/LocalLow/Jutsu Games/911 Operator", "windows"),
+            ("<xdgConfig>/unity3d/Jutsu Games/911 Operator", "linux"),
+            ("<home>/Library/Application Support/unity.Jutsu Games.911 Operator", "mac"),
+            // Distractors so tier 3 (one rule per side) can't be what matched.
+            ("<home>/AppData/LocalLow/Jutsu Games/Other", "windows"),
+            ("<xdgConfig>/unity3d/Jutsu Games/Other", "linux"),
+            ("<home>/Library/Application Support/Other", "mac"),
+        ]);
+        assert_eq!(
+            target_on("<home>/AppData/LocalLow/Jutsu Games/911 Operator", &files, Os::Linux).as_deref(),
+            Some("<xdgConfig>/unity3d/Jutsu Games/911 Operator")
+        );
+        assert_eq!(
+            target_on("<xdgConfig>/unity3d/Jutsu Games/911 Operator", &files, Os::Mac).as_deref(),
+            Some("<home>/Library/Application Support/unity.Jutsu Games.911 Operator")
+        );
+    }
+
+    #[test]
+    fn tier2_matches_when_one_os_adds_leading_folders() {
+        let files = rules(&[
+            ("<winAppData>/zog/hercules", "windows"),
+            ("<winAppData>/zog/other", "windows"),
+            ("<home>/.saves/zog/hercules", "linux"),
+            ("<home>/.saves/zog/other", "linux"),
+        ]);
+        assert_eq!(target_on("<winAppData>/zog/hercules", &files, Os::Linux).as_deref(), Some("<home>/.saves/zog/hercules"));
+    }
+
+    #[test]
+    fn tier3_pairs_the_only_rule_on_each_side_but_not_with_choices() {
+        let one_each = rules(&[
+            ("<winLocalAppData>/10_Second_Ninja", "windows"),
+            ("<home>/Library/Application Support/com.yoyogames.macyoyorunner", "mac"),
+        ]);
+        assert_eq!(
+            target_on("<winLocalAppData>/10_Second_Ninja", &one_each, Os::Mac).as_deref(),
+            Some("<home>/Library/Application Support/com.yoyogames.macyoyorunner")
+        );
+        let two_on_mac = rules(&[
+            ("<winLocalAppData>/10_Second_Ninja", "windows"),
+            ("<home>/Library/Application Support/com.yoyogames.macyoyorunner", "mac"),
+            ("<home>/Library/Application Support/Unrelated", "mac"),
+        ]);
+        assert!(target_on("<winLocalAppData>/10_Second_Ninja", &two_on_mac, Os::Mac).is_none());
+    }
+
+    #[test]
+    fn file_patterns_match_their_directory_both_ways() {
+        let files = rules(&[
+            ("<home>/AppData/LocalLow/Monomi Park/Slime Rancher/*.sav", "windows"),
+            ("<home>/AppData/LocalLow/Monomi Park/Slime Rancher/slimerancher.prf", "windows"),
+            ("<home>/Library/Application Support/Monomi Park/Slime Rancher", "mac"),
+            ("<xdgConfig>/unity3d/Fullbright/Tacoma/TacomaSave*.json", "linux"),
+            ("<home>/AppData/LocalLow/Fullbright/Tacoma", "windows"),
+        ]);
+        assert_eq!(
+            target_on("<home>/AppData/LocalLow/Monomi Park/Slime Rancher/*.sav", &files, Os::Mac).as_deref(),
+            Some("<home>/Library/Application Support/Monomi Park/Slime Rancher")
+        );
+        assert_eq!(
+            target_on("<home>/AppData/LocalLow/Fullbright/Tacoma", &files, Os::Linux).as_deref(),
+            Some("<xdgConfig>/unity3d/Fullbright/Tacoma/TacomaSave*.json")
+        );
+    }
+
+    #[test]
+    fn bundle_ids_and_feral_user_folders_match() {
+        let files = rules(&[
+            ("<home>/AppData/LocalLow/RedCandleGames/NineSols", "windows"),
+            ("<winAppData>/Other/Thing", "windows"),
+            ("<home>/Library/Application Support/com.RedCandleGames.NineSols", "mac"),
+            ("<home>/Library/Application Support/Unrelated", "mac"),
+            ("<winAppData>/The Creative Assembly/Warhammer2/save_games", "windows"),
+            (
+                "<xdgData>/feral-interactive/Total War WARHAMMER II/SaveData/Steam Saves (<storeUserId>)/local/Warhammer2/save_games",
+                "linux",
+            ),
+            ("<xdgData>/feral-interactive/Unrelated", "linux"),
+        ]);
+        assert_eq!(
+            target_on("<home>/AppData/LocalLow/RedCandleGames/NineSols", &files, Os::Mac).as_deref(),
+            Some("<home>/Library/Application Support/com.RedCandleGames.NineSols")
+        );
+        assert!(target_on("<winAppData>/The Creative Assembly/Warhammer2/save_games", &files, Os::Linux)
+            .is_some_and(|t| t.ends_with("Warhammer2/save_games")));
+    }
+
+    #[test]
+    fn gaps_report_os_pairs_with_no_counterpart() {
+        let files = rules(&[
+            ("<winAppData>/A", "windows"),
+            ("<winAppData>/B", "windows"),
+            ("<home>/Library/Application Support/C", "mac"),
+            ("<home>/Library/Application Support/D", "mac"),
+            ("<xdgData>/A", "linux"),
+        ]);
+        let gaps = cross_os_gaps(&files);
+        assert!(gaps.contains(&(Os::Windows, Os::Mac)) && gaps.contains(&(Os::Mac, Os::Windows)));
+        assert!(gaps.contains(&(Os::Linux, Os::Mac)));
+        assert!(!gaps.contains(&(Os::Windows, Os::Linux)) && !gaps.contains(&(Os::Linux, Os::Windows)));
+    }
+
+    fn rule_with(oss: &[&str], store: Option<&str>) -> FileRule {
+        FileRule {
+            tags: vec!["save".to_owned()],
+            when: oss.iter().map(|os| Constraint { os: Some(os.to_string()), store: store.map(str::to_owned) }).collect(),
+        }
+    }
+
+    fn full_target(template: &str, files: &HashMap<String, FileRule>, os: Os, from: Os) -> Option<RestoreTarget> {
+        let game = fake_game(scratch_library("real-games"), 1);
+        restore_target(template, files, os, Some(from), &game)
+    }
+
+    #[test]
+    fn hades_ignores_the_microsoft_store_rule_and_matches_by_name() {
+        let mut files = rules(&[
+            ("<home>/Library/Application Support/Supergiant Games/Hades", "mac"),
+            ("<winDocuments>/Saved Games/Hades", "windows"),
+        ]);
+        files.insert(
+            "<winLocalAppData>/Packages/SupergiantGamesLLC.Hades_q53c1yqmx7pha/SystemAppData/wgs".into(),
+            rule_with(&["windows"], Some("microsoft")),
+        );
+        assert!(cross_os_gaps(&files).is_empty());
+        let t = full_target("<winDocuments>/Saved Games/Hades", &files, Os::Mac, Os::Windows);
+        assert_eq!(t.map(|t| t.template).as_deref(), Some("<home>/Library/Application Support/Supergiant Games/Hades"));
+    }
+
+    #[test]
+    fn celeste_counts_locations_not_rules() {
+        // Two Windows patterns in one folder are one location, so the only
+        // location on each side pairs up.
+        let files = rules(&[
+            ("<base>/Saves/*.celeste", "windows"),
+            ("<base>/Saves/debug.celeste", "windows"),
+            ("<home>/Library/Application Support/Celeste/Saves", "mac"),
+        ]);
+        assert!(cross_os_gaps(&files).is_empty());
+    }
+
+    #[test]
+    fn slay_the_spire_app_bundle_and_multi_os_rules() {
+        let mut files = rules(&[("<base>/SlayTheSpire.app/Contents/Resources/saves", "mac")]);
+        files.insert("<base>/saves".into(), rule_with(&["linux", "windows"], None));
+        assert!(cross_os_gaps(&files).is_empty());
+        let t = full_target("<base>/saves", &files, Os::Mac, Os::Windows).expect("mac counterpart");
+        assert_eq!(t.template, "<base>/SlayTheSpire.app/Contents/Resources/saves");
+        assert!(!t.path.contains('<'), "{}", t.path);
+    }
+
+    #[test]
+    fn nested_locations_add_or_drop_the_extra_folder() {
+        // Terraria: Windows/Mac keep the whole folder, Linux lists subfolders.
+        let files = rules(&[
+            ("<winDocuments>/My Games/Terraria", "windows"),
+            ("<home>/Library/Application Support/Terraria", "mac"),
+            ("<xdgData>/Terraria/Players/*.plr", "linux"),
+            ("<xdgData>/Terraria/Worlds/*.wld", "linux"),
+        ]);
+        assert!(cross_os_gaps(&files).is_empty());
+        // Linux Players/ → into Terraria/Players on the Mac.
+        let t = full_target("<xdgData>/Terraria/Players/*.plr", &files, Os::Mac, Os::Linux).expect("mac parent");
+        assert_eq!(t.template, "<home>/Library/Application Support/Terraria");
+        assert!(t.path.ends_with("Terraria/Players") && !t.file_pattern, "{}", t.path);
+        // Windows Terraria/ → up from Players/*.plr to Terraria on Linux.
+        let t = full_target("<winDocuments>/My Games/Terraria", &files, Os::Linux, Os::Windows).expect("linux parent");
+        assert!(t.path.ends_with("/Terraria") && !t.file_pattern, "{}", t.path);
+    }
+
+    #[test]
+    fn rimworld_saves_subfolder_maps_into_the_windows_game_folder() {
+        let files = rules(&[
+            ("<home>/.config/unity3d/Ludeon Studios/RimWorld/Saves", "linux"),
+            ("<home>/AppData/LocalLow/Ludeon Studios/RimWorld", "windows"),
+            ("<home>/AppData/LocalLow/Ludeon Studios/RimWorld by Ludeon Studios/Saves", "windows"),
+        ]);
+        assert!(cross_os_gaps(&files).is_empty());
+    }
+
     #[test]
     fn restore_maps_mac_location_to_linux_counterpart() {
         let game = fake_game(scratch_library("restore-mac-linux"), 736260);
         let (template, path) =
-            restore_target("<home>/Library/Application Support/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+            restore_pair("<home>/Library/Application Support/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
                 .expect("linux has a counterpart");
         assert_eq!(template, "<xdgData>/Baba_Is_You");
         assert!(!path.contains("Library"), "mac path leaked onto linux: {path}");
@@ -403,7 +891,7 @@ mod tests {
     #[test]
     fn restore_maps_windows_location_to_mac_counterpart() {
         let game = fake_game(scratch_library("restore-win-mac"), 736260);
-        let (template, _) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Mac, &game)
+        let (template, _) = restore_pair("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Mac, &game)
             .expect("mac has a counterpart");
         assert_eq!(template, "<home>/Library/Application Support/Baba_Is_You");
     }
@@ -413,7 +901,7 @@ mod tests {
         // A Windows-captured version restored on Linux where the game runs
         // natively (no compatdata prefix): native location, not the prefix.
         let game = fake_game(scratch_library("restore-win-linux"), 736260);
-        let (template, path) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+        let (template, path) = restore_pair("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
             .expect("linux has a counterpart");
         assert_eq!(template, "<xdgData>/Baba_Is_You");
         assert!(!path.contains("compatdata"), "{path}");
@@ -424,7 +912,7 @@ mod tests {
         let library = scratch_library("restore-proton");
         let game = fake_game(library.clone(), 736260);
         std::fs::create_dir_all(proton_prefix(&game)).unwrap();
-        let (template, path) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+        let (template, path) = restore_pair("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
             .expect("prefix exists");
         assert_eq!(template, "<winAppData>/Baba_Is_You");
         assert!(path.contains("compatdata/736260/pfx"), "{path}");
@@ -438,8 +926,8 @@ mod tests {
             ("<home>/Library/Application Support/MacOnly".to_owned(), os_rule("mac")),
             ("<base>/save".to_owned(), FileRule { tags: vec!["save".to_owned()], when: Vec::new() }),
         ]);
-        assert!(restore_target("<home>/Library/Application Support/MacOnly", &files, Os::Linux, &game).is_none());
-        let (template, _) = restore_target("<base>/save", &files, Os::Linux, &game).expect("neutral rule applies");
+        assert!(restore_pair("<home>/Library/Application Support/MacOnly", &files, Os::Linux, &game).is_none());
+        let (template, _) = restore_pair("<base>/save", &files, Os::Linux, &game).expect("neutral rule applies");
         assert_eq!(template, "<base>/save");
     }
 

@@ -605,10 +605,36 @@ Python `main.py`.
     wrote 5 files to `~/Library/Application Support/Baba_Is_You`, all
     matching, with the Mac's prior state kept as a pinned version. Test
     versions and marker removed afterwards; both sides "in sync".
-    Known limit: the location key only bridges rules whose OS-specific
-    part is a leading base dir; games whose per-OS paths differ further
-    down (renamed folders, `<storeUserId>` only on one OS) still skip
-    rather than restore.
+  - **Tiered cross-OS matching (2026-10-20).** The base-dir key alone
+    bridged only 30% of OS pairs in the manifest (3,135 Steam games with
+    saves on 2+ OSes), so `restore_target` now compares *locations*
+    (`location_parts`: base dir stripped — incl. `<home>/AppData/*`,
+    `unity3d/`, `My Games/`, `Saved Games/` —, a trailing file pattern
+    dropped, a macOS `X.app/Contents/Resources` dropped, leading dot
+    dropped, `unity.`/`com.Company.Product` split) in tiers: (1) same
+    location; (2) nested — one is a subfolder of the other (Terraria's
+    `Terraria` vs `Terraria/Players/*.plr`, RimWorld), restore adds or
+    drops the extra level; (3) same last two folder names or same
+    distinctive last name (≥4 chars, not generic like `saves`/`data`;
+    Hades' `Supergiant Games/Hades` vs `Saved Games/Hades`); (4) exactly
+    one save *location* on each side. Only OS-specific rules that apply to
+    Steam are candidates (Microsoft Store `Packages/…/wgs` rules and
+    OS-neutral rules excluded; a rule tagged for several OSes counts for
+    each). `extract` now gets the version's OS so tier 4 counts the right
+    side. Remapped single files keep their own name inside the chosen
+    directory; a directory remapped onto a file pattern restores into the
+    pattern's directory. Result over the whole manifest: **38 of 3,135
+    games** still have an OS pair with no match (was 287 after the first
+    pass); `yasgm manifest-gaps [--json|--explain]` (dev) lists them /
+    every chosen mapping with its tier (6,709 tier 1, 311 tier 2, 2,215
+    tier 3, 1,500 tier 4). Sampled tier 3/4 mappings looked right; the
+    weakest kind is a macOS Unity `unity.….plist` prefs file paired with a
+    Linux folder (lands there, but prefs formats differ). Warnings for the
+    remaining games: `doctor` prints `⚠ cross-OS: …`, `config --json`
+    carries `cross_os_note`, the GUI shows it under the game header, and
+    `restore` warns before restoring a version from an OS it can't map.
+    Unit tests use the real rule shapes of Hades, Celeste, Slay the Spire,
+    Terraria, RimWorld, Nine Sols, Warhammer II, 911 Operator.
   Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
   the headless `watch` daemon on Linux; cross-restore Windows ↔ SteamOS
   via a Proton prefix (needs a Windows machine). (Flatpak packaging moved to post-1.0 — SteamOS ships via
