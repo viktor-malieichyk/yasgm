@@ -85,7 +85,8 @@ pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
 /// games themselves, so they'd otherwise appear as permanently
 /// "not in manifest" rows. Steam gives no reliable type flag in the ACF
 /// itself (that lives in the binary appinfo.vdf), so this is a denylist of
-/// known IDs rather than a general classifier.
+/// known IDs. Compatibility tools (Proton, Steam Linux Runtime) don't need
+/// listing: `installed_games` recognizes them by their toolmanifest.vdf.
 const NON_GAME_APP_IDS: &[u64] = &[
     228980, // Steamworks Common Redistributables
 ];
@@ -124,10 +125,16 @@ pub fn installed_games(libraries: &[PathBuf]) -> Result<Vec<InstalledGame>> {
             if NON_GAME_APP_IDS.contains(&app_id) {
                 continue;
             }
+            let install_dir = vdf::get_str(state, "installdir").unwrap_or_default().to_owned();
+            // Compatibility tools (Proton, Steam Linux Runtime, ...) all ship
+            // a toolmanifest.vdf in their install dir; games never do.
+            if !install_dir.is_empty() && steamapps.join("common").join(&install_dir).join("toolmanifest.vdf").is_file() {
+                continue;
+            }
             games.push(InstalledGame {
                 app_id,
                 name: vdf::get_str(state, "name").unwrap_or("?").to_owned(),
-                install_dir: vdf::get_str(state, "installdir").unwrap_or_default().to_owned(),
+                install_dir,
                 library: library.clone(),
             });
         }
@@ -167,4 +174,34 @@ pub fn account_ids(root: &Path) -> Vec<String> {
     }
     ids.sort();
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_acf(steamapps: &Path, app_id: u64, name: &str, install_dir: &str) {
+        let acf = format!(
+            "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"name\"\t\t\"{name}\"\n\t\"installdir\"\t\t\"{install_dir}\"\n}}\n"
+        );
+        fs::write(steamapps.join(format!("appmanifest_{app_id}.acf")), acf).unwrap();
+        fs::create_dir_all(steamapps.join("common").join(install_dir)).unwrap();
+    }
+
+    #[test]
+    fn skips_compatibility_tools_and_redistributables() {
+        let library = std::env::temp_dir().join(format!("yasgm-steam-lib-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&library);
+        let steamapps = library.join("steamapps");
+        fs::create_dir_all(&steamapps).unwrap();
+        write_acf(&steamapps, 2140020, "Stronghold: Definitive Edition", "Stronghold Definitive Edition");
+        write_acf(&steamapps, 4628740, "Proton 11.0 (ARM64)", "Proton 11.0 (ARM64)");
+        fs::write(steamapps.join("common/Proton 11.0 (ARM64)/toolmanifest.vdf"), "\"manifest\" {}").unwrap();
+        write_acf(&steamapps, 228980, "Steamworks Common Redistributables", "Steamworks Shared");
+
+        let games = installed_games(&[library.clone()]).unwrap();
+        let ids: Vec<u64> = games.iter().map(|g| g.app_id).collect();
+        assert_eq!(ids, vec![2140020]);
+        fs::remove_dir_all(&library).unwrap();
+    }
 }

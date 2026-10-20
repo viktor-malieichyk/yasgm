@@ -555,9 +555,32 @@ Python `main.py`.
     Wine/Proton actually writing files there, or SteamOS-specific quirks —
     only that YASGM's own mapping arithmetic is correct, which was the
     part previously resting on code review alone.
-  Remaining in Phase 2 (needs SteamOS/Linux hardware to validate): running
-  the above against a real Proton prefix end-to-end, cross-OS
-  normalization. (Flatpak packaging moved to post-1.0 — SteamOS ships via
+  - **First run on SteamOS (steamac VM, 2026-10-20).** SteamOS 0.4.5
+    aarch64 (`BUILD_ID=20261007.6125817`), user `steamos`. Binary: static
+    `aarch64-unknown-linux-musl` cross-built on the Mac with
+    `cargo zigbuild` (zig from Homebrew; plain `cargo build --target`
+    can't link ring's C code). Gotcha: Homebrew's `rustc` shadows rustup's
+    and has no musl std, so put `$(dirname $(rustup which rustc))` first in
+    PATH. Copied over `scp -P 2222` to `~/yasgm-dev`. Results: Steam root
+    `~/.local/share/Steam` found; Proton save path resolved inside the
+    prefix for Stronghold: Definitive Edition
+    (`compatdata/2140020/pfx/drive_c/users/steamuser/AppData/LocalLow/…`,
+    57 files, 42.5 MB) with Steam Cloud detected → backup-only; install-dir
+    rules for two other Proton games resolved. Sync with a LocalFolder
+    provider uploaded 59 files (30.6 MB); after deleting a save, restore
+    brought back all 59 files and the tree's sha256 matched the pre-sync
+    one exactly; a pinned safety version of the pre-restore state was kept.
+    Icons came from Steam's librarycache on SteamOS too. Fix found:
+    Proton 11.0 and Steam Linux Runtime were listed as games ("not in
+    manifest") — `installed_games` now skips any app whose install dir has
+    a `toolmanifest.vdf` (every Steam compatibility tool ships one, games
+    don't; unit-tested). VM access setup: SSH must be enabled in the
+    launcher (Settings → Advanced) — it boots with `steamac.ssh=0` otherwise
+    and runtime-masks sshd, so `systemctl enable` fails; `passwd` for the
+    `steamos` user, then `ssh-copy-id -p 2222`.
+  Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
+  cross-OS restore (Mac/Windows ↔ SteamOS through a shared provider),
+  the headless `watch` daemon on Linux, cross-OS normalization. (Flatpak packaging moved to post-1.0 — SteamOS ships via
   the Decky plugin, D21.)
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
   macOS; Linux paths written but unvalidated per 2026-07-20 direction).
