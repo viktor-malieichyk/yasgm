@@ -1025,6 +1025,36 @@ Python `main.py`.
     one launch, immediately clicking "Show" or just waiting resolved it
     every other time) — not reproduced across a clean 8-second polling
     run, treated as automation timing noise rather than a product bug.
+  - **Game icons + visual refresh (2026-10-20).** New `src/icons.rs` +
+    `yasgm icons [appid...] [--offline] [--json] [--embed]`. Cross-platform
+    by construction: Steam's own image cache
+    `<Steam root>/appcache/librarycache` has the same layout on Windows,
+    macOS and Linux/SteamOS — current clients store
+    `<appid>/<sha1>.jpg` (the 32×32 community icon, next to `header.jpg`,
+    `logo.png`, `library_600x900.jpg`, `library_hero.jpg`), pre-2024 clients
+    `<appid>_icon.jpg`; both are checked. Coverage on the dev Mac: 2,507 of
+    3,090 cached apps have the icon (Steam only caches what it has shown),
+    all 9 installed games. Fallback: Steam's keyless store API
+    (`IStoreBrowseService/GetItems`, `include_assets` → `community_icon`
+    hash, 50 apps per call) + `cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/<appid>/<hash>.jpg`
+    (byte-identical to Steam's cached file), saved once to
+    `<cache dir>/yasgm/icons/<appid>.jpg`; apps with no icon get a `.miss`
+    marker and aren't re-queried for 7 days; an offline lookup records
+    nothing. Downloaded icons are never refreshed (Steam rarely changes
+    them). `--embed` adds `data:` URLs so the webview needs no file access
+    or asset-protocol scope (Steam's root on Windows is arbitrary). Also:
+    `find_steam_root` on Windows now tries `HKCU\Software\Valve\Steam\SteamPath`
+    first, so Steam on another drive is found. GUI: new `game_icons`
+    command; icons load in two passes (local cache instantly, then
+    downloads), with a letter tile (per-appid hue) as placeholder. Layout
+    redone as a full-height sidebar (brand, Library/Settings nav, game list
+    with icon + short mode label) and a content pane of cards. Themes:
+    System / Light / Dark / **Steam** (Steam client navy + `#66c0f4` blue,
+    green primary buttons, square corners; native titlebar forced dark).
+    Light/Dark use the OS accent via `--system-accent` (set from
+    `get_accent_color`) so Steam can keep its own blue. Window default
+    1000×680, min 760×480. Visually checked in all themes via headless
+    Chrome with a stubbed `__TAURI__` fed real `config`/`icons` output.
   Remaining in Phase 4: auto-update (moved into the v1.0 release plan
   below); additional cloud providers beyond OneDrive/LocalFolder (post-1.0).
 - **Phase 5 — Decky plugin (~2–3 wks)**: NEW 2026-10-19 (D19). Blocked on

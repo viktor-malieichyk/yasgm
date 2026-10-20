@@ -11,6 +11,8 @@
 //! app via `bundle.externalBin`, so this works identically in `tauri dev`
 //! and in a built `.app` — no dev-path guessing or reliance on PATH.
 
+use std::collections::HashMap;
+
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 #[cfg(target_os = "macos")]
@@ -71,6 +73,24 @@ async fn restore_version(app: AppHandle, app_id: u64, version_id: String) -> Res
 async fn list_games(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
     let stdout = run_yasgm(&app, &["config", "--json"]).await?;
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
+/// appid → `data:` URL of the game's icon, from `yasgm icons --json --embed`
+/// (Steam's local image cache, plus a one-time download for the rest unless
+/// `offline`). Games without any icon are left out.
+#[tauri::command]
+async fn game_icons(app: AppHandle, offline: bool) -> Result<HashMap<String, String>, String> {
+    let mut args = vec!["icons", "--json", "--embed"];
+    if offline {
+        args.push("--offline");
+    }
+    let stdout = run_yasgm(&app, &args).await?;
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| Some((row["app_id"].as_u64()?.to_string(), row["data_url"].as_str()?.to_owned())))
+        .collect())
 }
 
 #[tauri::command]
@@ -367,6 +387,7 @@ pub fn run() {
         .manage(PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             list_versions,
+            game_icons,
             restore_version,
             list_games,
             set_game_config,

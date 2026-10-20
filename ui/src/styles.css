@@ -1,157 +1,163 @@
+/* ---- theme tokens -------------------------------------------------------
+   Four appearances, picked in Settings → Appearance:
+   - System (default, no data-theme attribute): light tokens below, swapped
+     for the dark ones by prefers-color-scheme.
+   - Light / Dark: data-theme="light" / "dark" force one or the other.
+   - Steam: data-theme="steam", the Steam client's navy/blue palette with
+     its green primary button.
+   Light and Dark follow the OS accent color: main.js's loadAccentColor()
+   sets --system-accent from the real native setting (the CSS AccentColor
+   keyword doesn't reflect it reliably in WKWebView). Steam ignores it and
+   uses Steam's own blue. */
+
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 15px;
-  line-height: 22px;
-  font-weight: 400;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Inter, Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --accent: var(--system-accent, #0a84ff);
+  --accent-text: var(--system-accent-text, #ffffff);
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-
-  /* Light theme (default). Overridden by prefers-color-scheme for
-     data-theme="system" (the default, no attribute set), or forced
-     directly by data-theme="light"/"dark" from the theme picker. */
-  --fg: #0f0f0f;
-  --bg: #f6f6f6;
-  --input-fg: #0f0f0f;
+  --bg: #f5f5f7;
+  --sidebar-bg: #ebebf0;
+  --surface: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --fg: #1d1d1f;
+  --fg-muted: #6e6e73;
+  --hover-bg: rgba(0, 0, 0, 0.05);
+  --selected-bg: color-mix(in srgb, var(--accent) 14%, transparent);
+  --selected-fg: var(--fg);
   --input-bg: #ffffff;
-  --input-border: rgba(128, 128, 128, 0.4);
-  --btn-active-bg: #e8e8e8;
-  --selected-bg: color-mix(in srgb, var(--accent) 12%, transparent);
-  --badge-active-bg: rgba(52, 168, 83, 0.18);
+  --input-border: rgba(0, 0, 0, 0.14);
+  --btn-bg: #ffffff;
+  --btn-fg: var(--fg);
+  --btn-border: rgba(0, 0, 0, 0.12);
+  --btn-hover-bg: #f0f0f3;
+  --btn-hover-fg: var(--fg);
+  --primary-bg: var(--accent);
+  --primary-fg: var(--accent-text);
+  --primary-hover-bg: color-mix(in srgb, var(--accent) 85%, black);
+  --radius: 10px;
+  --control-radius: 7px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 1px 1px rgba(0, 0, 0, 0.03);
+  --badge-active-bg: rgba(52, 168, 83, 0.15);
   --badge-active-fg: #1e7e34;
-  --badge-pinned-bg: rgba(255, 152, 0, 0.18);
-  --badge-pinned-fg: #a05a00;
-  --badge-pending-bg: rgba(128, 128, 128, 0.18);
+  --badge-pinned-bg: rgba(255, 152, 0, 0.16);
+  --badge-pinned-fg: #9a5500;
+  --badge-pending-bg: rgba(128, 128, 128, 0.16);
   --badge-pending-fg: #5a5a5a;
-
-  /* System accent color (macOS: System Settings > Appearance > Accent
-     color). The CSS `AccentColor`/`AccentColorText` system-color keywords
-     were tried first but don't reliably reflect the real setting in this
-     WKWebView (always rendered macOS's default blue regardless — verified
-     against a real Purple-accent system). main.js's loadAccentColor()
-     overrides these at runtime via `get_accent_color`, which reads the
-     real setting natively; these are just the fallback before that
-     resolves (and for non-macOS, where it's a static approximation). */
-  --accent: #0a84ff;
-  --accent-text: #ffffff;
-
-  color: var(--fg);
-  background-color: var(--bg);
+  --content-bg: var(--bg);
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --fg: #f6f6f6;
-    --bg: #2f2f2f;
-    --input-fg: #ffffff;
-    --input-bg: #3a3a3a;
-    --input-border: rgba(255, 255, 255, 0.2);
-    --btn-active-bg: #4a4a4a;
-    --selected-bg: color-mix(in srgb, var(--accent) 25%, transparent);
-    --badge-active-bg: rgba(52, 168, 83, 0.28);
+  :root:not([data-theme="light"]):not([data-theme="steam"]) {
+    --bg: #1e1e20;
+    --sidebar-bg: #161618;
+    --surface: #27272a;
+    --border: rgba(255, 255, 255, 0.07);
+    --fg: #f2f2f4;
+    --fg-muted: #9c9ca3;
+    --hover-bg: rgba(255, 255, 255, 0.06);
+    --selected-bg: color-mix(in srgb, var(--accent) 28%, transparent);
+    --input-bg: #1c1c1f;
+    --input-border: rgba(255, 255, 255, 0.12);
+    --btn-bg: #34343a;
+    --btn-border: rgba(255, 255, 255, 0.08);
+    --btn-hover-bg: #3e3e45;
+    --primary-hover-bg: color-mix(in srgb, var(--accent) 85%, white);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --badge-active-bg: rgba(52, 168, 83, 0.25);
     --badge-active-fg: #6fe08a;
-    --badge-pinned-bg: rgba(255, 152, 0, 0.28);
+    --badge-pinned-bg: rgba(255, 152, 0, 0.25);
     --badge-pinned-fg: #ffb85c;
-    --badge-pending-bg: rgba(200, 200, 200, 0.28);
+    --badge-pending-bg: rgba(200, 200, 200, 0.2);
     --badge-pending-fg: #d0d0d0;
+    color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --fg: #f6f6f6;
-  --bg: #2f2f2f;
-  --input-fg: #ffffff;
-  --input-bg: #3a3a3a;
-  --input-border: rgba(255, 255, 255, 0.2);
-  --btn-active-bg: #4a4a4a;
-  --selected-bg: color-mix(in srgb, var(--accent) 25%, transparent);
-  --badge-active-bg: rgba(52, 168, 83, 0.28);
+  --bg: #1e1e20;
+  --sidebar-bg: #161618;
+  --surface: #27272a;
+  --border: rgba(255, 255, 255, 0.07);
+  --fg: #f2f2f4;
+  --fg-muted: #9c9ca3;
+  --hover-bg: rgba(255, 255, 255, 0.06);
+  --selected-bg: color-mix(in srgb, var(--accent) 28%, transparent);
+  --input-bg: #1c1c1f;
+  --input-border: rgba(255, 255, 255, 0.12);
+  --btn-bg: #34343a;
+  --btn-border: rgba(255, 255, 255, 0.08);
+  --btn-hover-bg: #3e3e45;
+  --primary-hover-bg: color-mix(in srgb, var(--accent) 85%, white);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --badge-active-bg: rgba(52, 168, 83, 0.25);
   --badge-active-fg: #6fe08a;
-  --badge-pinned-bg: rgba(255, 152, 0, 0.28);
+  --badge-pinned-bg: rgba(255, 152, 0, 0.25);
   --badge-pinned-fg: #ffb85c;
-  --badge-pending-bg: rgba(200, 200, 200, 0.28);
+  --badge-pending-bg: rgba(200, 200, 200, 0.2);
   --badge-pending-fg: #d0d0d0;
+  color-scheme: dark;
+}
+
+:root[data-theme="steam"] {
+  --font: "Motiva Sans", Arial, Helvetica, sans-serif;
+  --accent: #66c0f4;
+  --accent-text: #0e1c25;
+  --bg: #1b2838;
+  --content-bg: radial-gradient(ellipse 120% 60% at 50% -10%, #2a475e 0%, #1b2838 70%) fixed;
+  --sidebar-bg: #171a21;
+  --surface: rgba(0, 0, 0, 0.2);
+  --border: rgba(102, 192, 244, 0.1);
+  --fg: #c6d4df;
+  --fg-muted: #8f98a0;
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --selected-bg: linear-gradient(90deg, rgba(102, 192, 244, 0.28), rgba(102, 192, 244, 0.06));
+  --selected-fg: #ffffff;
+  --input-bg: #0e141b;
+  --input-border: #2a3f5a;
+  --btn-bg: rgba(103, 193, 245, 0.2);
+  --btn-fg: #67c1f5;
+  --btn-border: transparent;
+  --btn-hover-bg: linear-gradient(-60deg, #417a9b 5%, #67c1f5 95%);
+  --btn-hover-fg: #ffffff;
+  --primary-bg: linear-gradient(90deg, #75b022 5%, #588a1b 95%);
+  --primary-fg: #d2efa9;
+  --primary-hover-bg: linear-gradient(90deg, #8ed629 5%, #6aa621 95%);
+  --radius: 4px;
+  --control-radius: 2px;
+  --shadow: none;
+  --badge-active-bg: rgba(164, 208, 7, 0.2);
+  --badge-active-fg: #a4d007;
+  --badge-pinned-bg: rgba(102, 192, 244, 0.2);
+  --badge-pinned-fg: #66c0f4;
+  --badge-pending-bg: rgba(143, 152, 160, 0.2);
+  --badge-pending-fg: #b8c2ca;
+  color-scheme: dark;
+}
+
+/* ---- base ---------------------------------------------------------------- */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
 }
 
 body {
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
   color: var(--fg);
-  background-color: var(--bg);
-}
-
-.container {
-  margin: 0;
-  padding: 2vh 2em 1em;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.top-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1em;
-  width: 100%;
-  max-width: 900px;
-  margin-bottom: 0.6em;
-}
-
-h1 {
-  margin: 0;
-}
-
-.view-nav {
-  display: flex;
-  gap: 0.3em;
-}
-
-.nav-btn {
-  background: transparent;
-  border: 1px solid transparent;
-  box-shadow: none;
-  font-size: 0.85em;
-  opacity: 0.65;
-}
-
-.nav-btn:hover {
-  border-color: rgba(128, 128, 128, 0.3);
-  opacity: 0.85;
-}
-
-.nav-btn.selected {
-  background-color: var(--selected-bg);
-  border-color: var(--accent);
-  opacity: 1;
-}
-
-/* ---- segmented control (Appearance) ---- */
-
-.segmented {
-  display: inline-flex;
-  border: 1px solid var(--input-border);
-  border-radius: 8px;
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-synthesis: none;
   overflow: hidden;
-  width: fit-content;
-}
-
-.segment {
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
-  background: transparent;
-  padding: 0.4em 1em;
-}
-
-.segment + .segment {
-  border-left: 1px solid var(--input-border);
-}
-
-.segment.selected {
-  background-color: var(--accent);
-  color: var(--accent-text);
 }
 
 h2,
@@ -159,159 +165,376 @@ h3 {
   margin: 0;
 }
 
+h2 {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
 h3 {
-  font-size: 0.95em;
-  opacity: 0.75;
-  margin: 1.2em 0 0.4em;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin-bottom: 10px;
 }
 
 a {
-  font-weight: 500;
   color: var(--accent);
-  text-decoration: inherit;
+  text-decoration: none;
 }
 
-a:hover {
-  opacity: 0.8;
-}
-
-input,
-select,
-button {
-  border-radius: 6px;
-  border: 1px solid var(--input-border);
-  padding: 0.4em 0.7em;
-  font-size: 0.95em;
-  font-weight: 500;
-  font-family: inherit;
-  color: var(--input-fg);
-  background-color: var(--input-bg);
-  transition: border-color 0.2s;
-  outline: none;
-}
-
-button {
-  cursor: pointer;
-  border-color: transparent;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
-}
-
-button:hover {
-  border-color: var(--accent);
-}
-button:active {
-  background-color: var(--btn-active-bg);
-}
-button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* !important: this utility class must win regardless of what other rules
-   (e.g. .settings-page's own `display: flex`) set on the same element. */
+/* !important: this utility class must win over any display set elsewhere
+   on the same element (e.g. .settings-page's flex). */
 .hidden {
   display: none !important;
 }
 
 .muted {
-  opacity: 0.6;
-  font-size: 0.85em;
+  color: var(--fg-muted);
+  font-size: 12.5px;
 }
 
-/* ---- master-detail shell ---- */
+p {
+  margin: 0 0 8px;
+}
 
-.shell {
+/* ---- controls -------------------------------------------------------------- */
+
+input,
+select,
+button {
+  font: inherit;
+  font-size: 13px;
+  border-radius: var(--control-radius);
+  outline: none;
+}
+
+input,
+select {
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  padding: 5px 9px;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+button {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--btn-fg);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  box-shadow: var(--shadow);
+  padding: 5px 12px;
+  transition:
+    background 0.12s,
+    color 0.12s,
+    border-color 0.12s;
+}
+
+button:hover:not(:disabled) {
+  color: var(--btn-hover-fg);
+  background: var(--btn-hover-bg);
+}
+
+button:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.primary {
+  color: var(--primary-fg);
+  background: var(--primary-bg);
+  border-color: transparent;
+}
+
+button.primary:hover:not(:disabled) {
+  color: var(--primary-fg);
+  background: var(--primary-hover-bg);
+}
+
+:root[data-theme="steam"] button.primary:hover:not(:disabled) {
+  color: #ffffff;
+}
+
+/* ---- app shell ----------------------------------------------------------------- */
+
+.app {
   display: flex;
-  align-items: flex-start;
-  gap: 1.5em;
-  width: 100%;
-  max-width: 900px;
-  text-align: left;
+  height: 100vh;
 }
 
-#games-list {
-  width: 220px;
+.sidebar {
+  width: 250px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.15em;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  padding: 14px 10px 10px;
+  overflow: hidden;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 8px 14px;
+}
+
+.brand-logo {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.view-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-btn,
+.game-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: var(--control-radius);
+}
+
+.nav-btn {
+  padding: 6px 8px;
+  font-weight: 500;
+}
+
+.nav-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.8;
+}
+
+.nav-btn:hover:not(:disabled),
+.game-item:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover-bg);
+}
+
+.nav-btn.selected,
+.nav-btn.selected:hover,
+.game-item.selected,
+.game-item.selected:hover {
+  color: var(--selected-fg);
+  background: var(--selected-bg);
+}
+
+.sidebar-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  padding: 18px 8px 6px;
+}
+
+#games-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 -4px;
+  padding: 0 4px;
 }
 
 .game-item {
+  padding: 6px 8px;
+}
+
+.game-item.unsupported {
+  opacity: 0.55;
+}
+
+.game-text {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 0.1em;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  box-shadow: none;
-  padding: 0.5em 0.7em;
-}
-
-.game-item:hover {
-  border-color: rgba(128, 128, 128, 0.3);
-}
-
-.game-item.selected {
-  background-color: var(--selected-bg);
-  border-color: var(--accent);
-}
-
-.game-name {
-  font-weight: 600;
-}
-
-#detail {
-  flex: 1;
   min-width: 0;
 }
 
-#detail-empty {
-  opacity: 0.6;
+.game-name {
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-sub {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-item.selected .game-sub {
+  color: inherit;
+  opacity: 0.75;
+}
+
+/* Game icon: Steam's 32×32 community icon, or a letter tile when there's
+   none (hue derived from the appid so each game keeps its color). */
+.game-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  object-fit: cover;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+  color: #ffffff;
+  background: linear-gradient(135deg, hsl(var(--hue, 210) 55% 52%), hsl(calc(var(--hue, 210) + 40) 55% 40%));
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+img.game-icon {
+  background: transparent;
+}
+
+.game-icon.large {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  font-size: 21px;
+}
+
+:root[data-theme="steam"] .game-icon {
+  border-radius: 2px;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--content-bg);
+  padding: 24px 28px 16px;
+}
+
+#library-view,
+.settings-page,
+.update-banner {
+  max-width: 760px;
+}
+
+/* ---- library detail ------------------------------------------------------------- */
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  color: var(--fg-muted);
 }
 
 .detail-header {
   display: flex;
-  align-items: baseline;
-  gap: 0.6em;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.detail-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+  margin-bottom: 12px;
 }
 
 .settings-row {
   display: flex;
   align-items: center;
-  gap: 0.6em;
-  margin-top: 0.8em;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+.settings-row + .settings-row {
+  margin-top: 10px;
 }
 
 .settings-row label {
   display: flex;
   align-items: center;
-  gap: 0.4em;
-  font-size: 0.85em;
-  opacity: 0.8;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.row-spacer {
+  flex: 1;
 }
 
 .keep-input {
-  width: 7.5em;
+  width: 8.5em;
 }
 
 #versions-list {
   display: flex;
   flex-direction: column;
-  gap: 0.4em;
 }
 
 .version-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 1em;
-  padding: 0.5em 0;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.version-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.version-row:last-child {
+  padding-bottom: 0;
 }
 
 .version-info {
@@ -320,36 +543,41 @@ button:disabled {
 
 .version-actions {
   display: flex;
-  gap: 0.4em;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .version-actions button {
-  padding: 0.3em 0.7em;
-  font-size: 0.85em;
+  padding: 3px 10px;
+  font-size: 12px;
 }
 
 .badge {
   display: inline-block;
-  border-radius: 4px;
-  padding: 0.05em 0.5em;
-  font-size: 0.75em;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
   font-weight: 600;
-  margin-left: 0.4em;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+
+:root[data-theme="steam"] .badge {
+  border-radius: 2px;
 }
 
 .badge.active {
-  background-color: var(--badge-active-bg);
+  background: var(--badge-active-bg);
   color: var(--badge-active-fg);
 }
 
 .badge.pinned {
-  background-color: var(--badge-pinned-bg);
+  background: var(--badge-pinned-bg);
   color: var(--badge-pinned-fg);
 }
 
 .badge.pending {
-  background-color: var(--badge-pending-bg);
+  background: var(--badge-pending-bg);
   color: var(--badge-pending-fg);
 }
 
@@ -357,52 +585,74 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.8em;
-  width: 100%;
-  max-width: 900px;
-  box-sizing: border-box;
-  margin-bottom: 0.8em;
-  padding: 0.5em 0.9em;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  background-color: var(--selected-bg);
-  text-align: left;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
 }
 
 #status-msg {
-  margin-top: 1.2em;
-  opacity: 0.7;
+  max-width: 760px;
+  margin: 8px 0 0;
   min-height: 1.2em;
+  font-size: 12.5px;
+  color: var(--fg-muted);
 }
 
-/* ---- settings screen ---- */
+/* ---- settings ------------------------------------------------------------------- */
 
 .settings-page {
-  width: 100%;
-  max-width: 900px;
-  text-align: left;
   display: flex;
   flex-direction: column;
-  gap: 1.6em;
 }
 
-.settings-section h3 {
-  margin-top: 0;
+.page-title {
+  margin-bottom: 18px;
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: calc(var(--control-radius) + 2px);
+  background: var(--hover-bg);
+  border: 1px solid var(--border);
+}
+
+.segment {
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--fg);
+  padding: 4px 14px;
+}
+
+.segment:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--fg);
+}
+
+.segment.selected,
+.segment.selected:hover {
+  background: var(--accent);
+  color: var(--accent-text);
 }
 
 .provider-option {
-  border: 1px solid rgba(128, 128, 128, 0.25);
-  border-radius: 8px;
-  padding: 0.7em 0.9em;
-  margin-top: 0.6em;
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  padding: 10px 12px;
+  margin-top: 10px;
 }
 
 .provider-option-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.6em;
-  margin-bottom: 0.5em;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 #provider-local-path {
@@ -413,11 +663,25 @@ button:disabled {
 .toggle-row {
   display: flex;
   align-items: center;
-  gap: 0.5em;
+  gap: 8px;
   cursor: pointer;
+  margin-bottom: 6px;
 }
 
 .toggle-row input[type="checkbox"] {
-  width: auto;
-  padding: 0;
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-muted) 35%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }

@@ -22,6 +22,10 @@ pub fn find_steam_root() -> Option<PathBuf> {
         vec![home.join("Library/Application Support/Steam")]
     } else if cfg!(target_os = "windows") {
         let mut v = Vec::new();
+        // Where Steam itself says it lives (covers installs on other drives).
+        if let Some(path) = windows_steam_path() {
+            v.push(path);
+        }
         if let Ok(pf) = std::env::var("ProgramFiles(x86)") {
             v.push(PathBuf::from(pf).join("Steam"));
         }
@@ -38,6 +42,20 @@ pub fn find_steam_root() -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|p| p.join("steamapps").is_dir())
+}
+
+#[cfg(windows)]
+fn windows_steam_path() -> Option<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Valve\\Steam").ok()?;
+    let path: String = key.get_value("SteamPath").ok()?;
+    Some(PathBuf::from(path))
+}
+
+#[cfg(not(windows))]
+fn windows_steam_path() -> Option<PathBuf> {
+    None
 }
 
 /// All Steam library directories (each containing a `steamapps` folder).

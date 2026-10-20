@@ -5,6 +5,7 @@
 mod autostart;
 mod config;
 mod fsutil;
+mod icons;
 mod local;
 mod lock;
 mod manifest;
@@ -1296,6 +1297,51 @@ fn config_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Icon file per game: Steam's local image cache first, then (unless
+/// `--offline`) a one-time download for the rest (see icons.rs). Defaults
+/// to all installed games. `--embed` adds a `data_url` per entry for the
+/// GUI's webview, which can't read local files.
+fn icons_cmd(args: &[String]) -> Result<()> {
+    let root = steam::find_steam_root();
+    let pos = positionals(args);
+    let app_ids: Vec<u64> = if pos.is_empty() {
+        let root = root.as_ref().context("Steam installation not found")?;
+        steam::installed_games(&steam::libraries(root)?)?.iter().map(|g| g.app_id).collect()
+    } else {
+        pos.iter()
+            .map(|p| p.parse().context("usage: yasgm icons [appid...] [--offline] [--json] [--embed]"))
+            .collect::<Result<_>>()?
+    };
+    let dir = icons::cache_dir()?;
+    if !flag(args, "--offline") {
+        let missing: Vec<u64> =
+            app_ids.iter().copied().filter(|&id| icons::resolve(root.as_deref(), &dir, id).is_none()).collect();
+        if !missing.is_empty() {
+            if let Err(err) = icons::fetch(&dir, &missing) {
+                eprintln!("icons: download skipped: {err:#}");
+            }
+        }
+    }
+    let embed = flag(args, "--embed");
+    let mut json_out = Vec::new();
+    for &app_id in &app_ids {
+        let path = icons::resolve(root.as_deref(), &dir, app_id);
+        if flag(args, "--json") {
+            let mut entry = serde_json::json!({ "app_id": app_id, "path": path });
+            if let (true, Some(path)) = (embed, &path) {
+                entry["data_url"] = icons::data_url(path)?.into();
+            }
+            json_out.push(entry);
+        } else {
+            println!("{app_id}\t{}", path.map(|p| p.display().to_string()).unwrap_or_else(|| "-".into()));
+        }
+    }
+    if flag(args, "--json") {
+        println!("{}", serde_json::to_string(&json_out)?);
+    }
+    Ok(())
+}
+
 fn pin_cmd(args: &[String], pinned: bool) -> Result<()> {
     let pos = positionals(args);
     let (Some(app_id), Some(version_id)) = (
@@ -1493,6 +1539,7 @@ fn main() -> Result<()> {
         Some("versions") => versions_cmd(&args),
         Some("restore") => restore_cmd(&args),
         Some("config") => config_cmd(&args),
+        Some("icons") => icons_cmd(&args),
         Some("pin") => pin_cmd(&args, true),
         Some("unpin") => pin_cmd(&args, false),
         Some("rm") => rm_cmd(&args),
@@ -1509,6 +1556,7 @@ fn main() -> Result<()> {
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [--json | <appid> --mode auto|sync|backup|off --keep N | --clear]\n  \
+                 icons [appid...] [--offline] [--json] [--embed]\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \
                  rm <appid> <version-id>"
             );

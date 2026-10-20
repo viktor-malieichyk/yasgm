@@ -9,124 +9,155 @@
   </head>
 
   <body>
-    <main class="container">
-      <div class="top-bar">
-        <h1>YASGM</h1>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <img src="assets/logo.png" alt="" class="brand-logo" />
+          <span class="brand-name">YASGM</span>
+        </div>
+
         <nav class="view-nav">
-          <button id="nav-library" class="nav-btn selected" type="button">Library</button>
-          <button id="nav-settings" class="nav-btn" type="button">Settings</button>
+          <button id="nav-library" class="nav-btn selected" type="button">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14M3 10h14M3 16h14" /></svg>
+            Library
+          </button>
+          <button id="nav-settings" class="nav-btn" type="button">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle cx="10" cy="10" r="2.6" />
+              <path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" />
+            </svg>
+            Settings
+          </button>
         </nav>
-      </div>
 
-      <div id="update-banner" class="update-banner hidden">
-        <span id="update-banner-text"></span>
-        <button id="update-install-btn" type="button">Install &amp; restart</button>
-      </div>
+        <div class="sidebar-label">Games</div>
+        <div id="games-list"></div>
+      </aside>
 
-      <div id="library-view" class="shell">
-        <aside id="games-list"></aside>
+      <main class="content">
+        <div id="update-banner" class="update-banner hidden">
+          <span id="update-banner-text"></span>
+          <button id="update-install-btn" class="primary" type="button">Install &amp; restart</button>
+        </div>
 
-        <section id="detail">
-          <p id="detail-empty">Select a game to view its settings and versions.</p>
+        <div id="library-view">
+          <div id="detail-empty" class="empty-state">
+            <p>Select a game to view its settings and versions.</p>
+          </div>
 
           <div id="detail-content" class="hidden">
-            <div class="detail-header">
-              <h2 id="detail-title"></h2>
-              <span id="detail-appid" class="muted"></span>
+            <header class="detail-header">
+              <div id="detail-icon" class="game-icon large"></div>
+              <div class="detail-heading">
+                <h2 id="detail-title"></h2>
+                <span id="detail-appid" class="muted"></span>
+              </div>
+            </header>
+
+            <section class="card">
+              <h3>Sync settings</h3>
+              <div class="settings-row">
+                <label
+                  >Mode
+                  <select id="mode-select"></select>
+                </label>
+                <label
+                  >Keep
+                  <input id="keep-input" type="number" min="1" class="keep-input" />
+                </label>
+                <div class="row-spacer"></div>
+                <button id="reset-btn" type="button">Reset</button>
+                <button id="save-btn" class="primary" type="button">Save</button>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>Locations</h3>
+              <div class="settings-row">
+                <button id="open-saves-btn" type="button">Open save location</button>
+                <button id="open-provider-btn" type="button">Open in cloud provider</button>
+                <button id="open-backups-btn" type="button" class="hidden">Open backups location</button>
+                <span id="open-location-msg" class="muted"></span>
+              </div>
+            </section>
+
+            <section class="card">
+              <h3>Versions</h3>
+              <div id="versions-list"></div>
+            </section>
+          </div>
+        </div>
+
+        <div id="settings-view" class="settings-page hidden">
+          <h2 class="page-title">Settings</h2>
+
+          <section class="card">
+            <h3>Appearance</h3>
+            <div id="theme-switch" class="segmented" role="group" aria-label="Appearance">
+              <button type="button" class="segment" data-theme-option="system">System</button>
+              <button type="button" class="segment" data-theme-option="light">Light</button>
+              <button type="button" class="segment" data-theme-option="dark">Dark</button>
+              <button type="button" class="segment" data-theme-option="steam">Steam</button>
             </div>
+          </section>
+
+          <section class="card">
+            <h3>Cloud provider</h3>
+            <p id="provider-current" class="muted"></p>
 
             <div class="settings-row">
-              <label
-                >Mode
-                <select id="mode-select"></select>
-              </label>
-              <label
-                >Keep
-                <input id="keep-input" type="number" min="1" class="keep-input" />
-              </label>
-              <button id="save-btn">Save</button>
-              <button id="reset-btn">Reset</button>
+              <button id="provider-check-btn" type="button">Check connection</button>
+              <span id="provider-status-msg" class="muted"></span>
             </div>
 
+            <div class="provider-option">
+              <div class="provider-option-header">
+                <strong>OneDrive</strong>
+                <button id="provider-onedrive-btn" type="button">Use OneDrive</button>
+              </div>
+              <div class="settings-row">
+                <button id="provider-auth-btn" type="button">Sign in…</button>
+                <span id="provider-auth-msg" class="muted"></span>
+              </div>
+            </div>
+
+            <div class="provider-option">
+              <div class="provider-option-header">
+                <strong>Local folder</strong>
+              </div>
+              <div class="settings-row">
+                <input id="provider-local-path" type="text" placeholder="/path/to/sync/folder" />
+                <button id="provider-local-browse-btn" type="button">Browse…</button>
+                <button id="provider-local-btn" type="button">Use this folder</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h3>Autostart</h3>
+            <label class="toggle-row">
+              <input id="autostart-toggle" type="checkbox" />
+              Launch YASGM's sync daemon at login
+            </label>
+            <p id="autostart-detail" class="muted"></p>
+          </section>
+
+          <section class="card">
+            <h3>Updates</h3>
+            <p id="update-current" class="muted"></p>
+            <label class="toggle-row">
+              <input id="update-auto-toggle" type="checkbox" />
+              Check for updates automatically
+            </label>
             <div class="settings-row">
-              <button id="open-saves-btn" type="button">Open save location</button>
-              <button id="open-provider-btn" type="button">Open in cloud provider</button>
-              <button id="open-backups-btn" type="button" class="hidden">Open backups location</button>
-              <span id="open-location-msg" class="muted"></span>
+              <button id="update-check-btn" type="button">Check now</button>
+              <span id="update-msg" class="muted"></span>
             </div>
+          </section>
+        </div>
 
-            <h3>Versions</h3>
-            <div id="versions-list"></div>
-          </div>
-        </section>
-      </div>
-
-      <div id="settings-view" class="settings-page hidden">
-        <section class="settings-section">
-          <h3>Appearance</h3>
-          <div id="theme-switch" class="segmented" role="group" aria-label="Appearance">
-            <button type="button" class="segment" data-theme-option="system">System</button>
-            <button type="button" class="segment" data-theme-option="light">Light</button>
-            <button type="button" class="segment" data-theme-option="dark">Dark</button>
-          </div>
-        </section>
-
-        <section class="settings-section">
-          <h3>Cloud provider</h3>
-          <p id="provider-current" class="muted"></p>
-
-          <div class="settings-row">
-            <button id="provider-check-btn" type="button">Check connection</button>
-          </div>
-          <p id="provider-status-msg" class="muted"></p>
-
-          <div class="provider-option">
-            <div class="provider-option-header">
-              <strong>OneDrive</strong>
-              <button id="provider-onedrive-btn" type="button">Use OneDrive</button>
-            </div>
-            <div class="settings-row">
-              <button id="provider-auth-btn" type="button">Sign in…</button>
-              <span id="provider-auth-msg" class="muted"></span>
-            </div>
-          </div>
-
-          <div class="provider-option">
-            <div class="provider-option-header">
-              <strong>Local folder</strong>
-            </div>
-            <div class="settings-row">
-              <input id="provider-local-path" type="text" placeholder="/path/to/sync/folder" />
-              <button id="provider-local-browse-btn" type="button">Browse…</button>
-              <button id="provider-local-btn" type="button">Use this folder</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="settings-section">
-          <h3>Autostart</h3>
-          <label class="toggle-row">
-            <input id="autostart-toggle" type="checkbox" />
-            Launch YASGM's sync daemon at login
-          </label>
-          <p id="autostart-detail" class="muted"></p>
-        </section>
-
-        <section class="settings-section">
-          <h3>Updates</h3>
-          <p id="update-current" class="muted"></p>
-          <label class="toggle-row">
-            <input id="update-auto-toggle" type="checkbox" />
-            Check for updates automatically
-          </label>
-          <div class="settings-row">
-            <button id="update-check-btn" type="button">Check now</button>
-            <span id="update-msg" class="muted"></span>
-          </div>
-        </section>
-      </div>
-
-      <p id="status-msg"></p>
-    </main>
+        <p id="status-msg"></p>
+      </main>
+    </div>
   </body>
 </html>

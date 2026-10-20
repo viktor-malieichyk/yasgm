@@ -46,6 +46,8 @@ let updateMsgEl;
 
 let games = [];
 let selectedAppId = null;
+// appid → data: URL of the game's icon (see loadIcons).
+let icons = {};
 
 // ---- top-level view switching (Library / Settings) -----------------------
 
@@ -61,7 +63,7 @@ function showView(view) {
   }
 }
 
-// ---- theme (light/dark/system) ------------------------------------------
+// ---- theme (system/light/dark/steam) -------------------------------------
 
 function applyTheme(theme) {
   if (theme === "system") {
@@ -76,7 +78,8 @@ function applyTheme(theme) {
   // CSS above is what actually themes the page content either way.
   const win = window.__TAURI__?.window?.getCurrentWindow?.();
   if (win) {
-    win.setTheme(theme === "system" ? null : theme).catch(() => {});
+    const native = theme === "system" ? null : theme === "steam" ? "dark" : theme;
+    win.setTheme(native).catch(() => {});
   }
 }
 
@@ -87,10 +90,12 @@ function loadTheme() {
 async function loadAccentColor() {
   try {
     const { accent, text } = await invoke("get_accent_color");
-    document.documentElement.style.setProperty("--accent", accent);
-    document.documentElement.style.setProperty("--accent-text", text);
+    // --system-*, not --accent directly: Light/Dark derive --accent from
+    // these, while the Steam theme keeps its own blue.
+    document.documentElement.style.setProperty("--system-accent", accent);
+    document.documentElement.style.setProperty("--system-accent-text", text);
   } catch {
-    // Static CSS fallback (--accent in styles.css) stays in effect.
+    // Static CSS fallback (in styles.css) stays in effect.
   }
 }
 
@@ -132,16 +137,84 @@ async function loadGames() {
   }
 }
 
+// Icons come in two passes: Steam's local cache first (instant), then a
+// second pass that downloads whatever Steam hadn't cached.
+async function loadIcons() {
+  for (const offline of [true, false]) {
+    try {
+      const found = await invoke("game_icons", { offline });
+      const changed = Object.keys(found).some((id) => icons[id] !== found[id]);
+      icons = { ...icons, ...found };
+      if (changed) {
+        renderGamesList();
+        renderDetailIcon();
+      }
+    } catch (err) {
+      console.warn("loading game icons failed:", err);
+    }
+  }
+}
+
+// Compact sidebar label for `effective_mode` (the full text stays in the
+// detail header): "backup-only (auto: Steam Cloud)" → "Backup only · Steam Cloud".
+function shortMode(g) {
+  if (!g.in_manifest) return "No known save location";
+  const m = g.effective_mode.match(/^([\w-]+)(?: \((.*)\))?$/);
+  if (!m) return g.effective_mode;
+  const mode = m[1].replace("-", " ");
+  const label = mode[0].toUpperCase() + mode.slice(1);
+  const why = m[2] === "override" ? "set manually" : (m[2] || "").replace(/^auto:?\s*/, "");
+  return why ? `${label} · ${why}` : label;
+}
+
+// An <img> for the game's icon, or a letter tile in a per-game color.
+function gameIcon(g, large = false) {
+  const url = icons[g.app_id];
+  const el = document.createElement(url ? "img" : "span");
+  el.className = "game-icon" + (large ? " large" : "");
+  if (url) {
+    el.src = url;
+    el.alt = "";
+  } else {
+    el.textContent = (g.game.match(/[\p{L}\p{N}]/u) || ["?"])[0].toUpperCase();
+    el.style.setProperty("--hue", (g.app_id * 47) % 360);
+  }
+  return el;
+}
+
 function renderGamesList() {
   gamesListEl.innerHTML = "";
   for (const g of games) {
     const item = document.createElement("button");
     item.type = "button";
-    item.className = "game-item" + (g.app_id === selectedAppId ? " selected" : "");
-    item.innerHTML = `<span class="game-name">${g.game}</span><span class="muted">${g.app_id}</span>`;
-    item.addEventListener("click", () => selectGame(g.app_id));
+    item.className =
+      "game-item" + (g.app_id === selectedAppId ? " selected" : "") + (g.in_manifest ? "" : " unsupported");
+    item.title = g.in_manifest ? g.game : `${g.game} — no save locations known for this game`;
+    const text = document.createElement("span");
+    text.className = "game-text";
+    const name = document.createElement("span");
+    name.className = "game-name";
+    name.textContent = g.game;
+    const sub = document.createElement("span");
+    sub.className = "game-sub";
+    sub.textContent = shortMode(g);
+    text.append(name, sub);
+    item.append(gameIcon(g), text);
+    item.addEventListener("click", () => {
+      showView("library");
+      selectGame(g.app_id);
+    });
     gamesListEl.appendChild(item);
   }
+}
+
+function renderDetailIcon() {
+  const g = games.find((game) => game.app_id === selectedAppId);
+  const slot = document.querySelector("#detail-icon");
+  if (!g || !slot) return;
+  const icon = gameIcon(g, true);
+  icon.id = "detail-icon";
+  slot.replaceWith(icon);
 }
 
 function selectGame(appId) {
@@ -167,6 +240,7 @@ function renderDetailSettings() {
   detailContentEl.classList.remove("hidden");
 
   detailTitleEl.textContent = g.game;
+  renderDetailIcon();
   detailAppIdEl.textContent = `AppID ${g.app_id} · ${g.effective_mode}`;
 
   modeSelectEl.innerHTML = "";
@@ -597,7 +671,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   loadTheme();
   loadAccentColor();
-  loadGames();
+  loadGames().then(loadIcons);
   loadUpdateSettings();
   if (autoUpdateEnabled()) checkForUpdate(false);
   setInterval(() => {
