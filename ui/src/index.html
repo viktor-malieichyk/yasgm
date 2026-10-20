@@ -26,6 +26,11 @@
           <span class="switch-track" aria-hidden="true"></span>
           Only without Steam Cloud
         </label>
+        <label class="filter-switch" title="Hide games with no save files on this computer, including games that are only in the cloud">
+          <input id="filter-local" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          Only with saves here
+        </label>
         <div id="games-list"></div>
       </aside>
 
@@ -51,7 +56,7 @@
 
             <p id="detail-warning" class="detail-warning hidden" role="note"></p>
 
-            <section class="card">
+            <section id="sync-card" class="card">
               <h3>Sync settings</h3>
               <div class="settings-row">
                 <label
@@ -68,7 +73,7 @@
               </div>
             </section>
 
-            <section class="card">
+            <section id="locations-card" class="card">
               <h3>Locations</h3>
               <div class="settings-row">
                 <button id="open-saves-btn" type="button">Open save location</button>

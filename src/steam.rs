@@ -181,6 +181,37 @@ pub fn steam_cloud_active(root: &Path, app_id: u64) -> bool {
     false
 }
 
+/// SteamID64 = this base + the 32-bit account ID used in `userdata/`.
+const STEAMID64_BASE: u64 = 76_561_197_960_265_728;
+
+/// The account signed in to Steam here — the cloud namespace (D4). From
+/// `config/loginusers.vdf`: the user marked `MostRecent`, else the newest
+/// `timestamp`. Falls back to the lowest `userdata` ID when that file is
+/// missing or names an account with no `userdata` folder.
+pub fn current_account(root: &Path) -> Option<String> {
+    let known = account_ids(root);
+    let recent = fs::read_to_string(root.join("config/loginusers.vdf"))
+        .ok()
+        .and_then(|text| most_recent_login(&text))
+        .filter(|id| known.contains(id));
+    recent.or_else(|| known.into_iter().next())
+}
+
+fn most_recent_login(text: &str) -> Option<String> {
+    let doc = vdf::parse(text).ok()?;
+    let users = vdf::get_obj(&doc, "users")?;
+    let rank = |entry: &vdf::Obj| {
+        let most_recent = vdf::get_str(entry, "mostrecent") == Some("1");
+        let timestamp: u64 = vdf::get_str(entry, "timestamp").and_then(|t| t.parse().ok()).unwrap_or(0);
+        (most_recent, timestamp)
+    };
+    let (id64, _) = users
+        .iter()
+        .filter_map(|(id, value)| Some((id.parse::<u64>().ok()?, rank(value.as_obj()?))))
+        .max_by_key(|(_, rank)| *rank)?;
+    id64.checked_sub(STEAMID64_BASE).map(|id| id.to_string())
+}
+
 /// Steam account IDs (accountid3) present on this machine — the basis for the
 /// per-account cloud namespace (D4).
 pub fn account_ids(root: &Path) -> Vec<String> {
@@ -207,6 +238,31 @@ mod tests {
         );
         fs::write(steamapps.join(format!("appmanifest_{app_id}.acf")), acf).unwrap();
         fs::create_dir_all(steamapps.join("common").join(install_dir)).unwrap();
+    }
+
+    #[test]
+    fn current_account_is_the_most_recent_login_not_the_lowest_id() {
+        let users = |a: &str, b: &str| {
+            format!(
+                "\"users\"\n{{\n \"76561199251892961\"\n {{\n \"MostRecent\" \"{a}\"\n \"timestamp\" \"200\"\n }}\n \"76561198018214427\"\n {{\n \"MostRecent\" \"{b}\"\n \"timestamp\" \"100\"\n }}\n}}\n"
+            )
+        };
+        assert_eq!(most_recent_login(&users("0", "1")).as_deref(), Some("57948699"));
+        assert_eq!(most_recent_login(&users("1", "0")).as_deref(), Some("1291627233"));
+        // No MostRecent flags (older files): the newest timestamp wins.
+        let no_flags = "\"users\" { \"76561198018214427\" { \"timestamp\" \"300\" } \"76561199251892961\" { \"timestamp\" \"200\" } }";
+        assert_eq!(most_recent_login(no_flags).as_deref(), Some("57948699"));
+
+        let root = std::env::temp_dir().join(format!("yasgm-steam-acct-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for id in ["1291627233", "57948699"] {
+            fs::create_dir_all(root.join("userdata").join(id)).unwrap();
+        }
+        assert_eq!(current_account(&root).as_deref(), Some("1291627233"), "no loginusers.vdf: lowest ID");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/loginusers.vdf"), users("0", "1")).unwrap();
+        assert_eq!(current_account(&root).as_deref(), Some("57948699"));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

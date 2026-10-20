@@ -3,6 +3,7 @@ const { invoke } = window.__TAURI__.core;
 const MODES = ["auto", "sync", "backup", "off"];
 const THEME_KEY = "yasgm-theme";
 const NO_CLOUD_KEY = "yasgm-only-no-steam-cloud";
+const LOCAL_ONLY_KEY = "yasgm-only-local-saves";
 const AUTO_UPDATE_KEY = "yasgm-auto-update";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -46,13 +47,29 @@ let selectedAppId = null;
 let onlyNoCloud = false;
 // Sidebar search text, lowercased.
 let searchQuery = "";
+// Sidebar filter: only games with save files on this computer.
+let onlyLocalSaves = false;
+// Games with cloud saves that aren't installed here (`cloud_games`), as
+// sidebar rows: { app_id, game, cloud_only: true, latest_machine, … }.
+let cloudOnly = [];
+
+function allGames() {
+  return [...games, ...cloudOnly].sort((a, b) => a.game.localeCompare(b.game, undefined, { sensitivity: "base" }));
+}
+
+function selectedGame() {
+  return allGames().find((game) => game.app_id === selectedAppId);
+}
 
 const CLOUD_ICON =
   '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 15.5a3.8 3.8 0 0 1-.4-7.58A5 5 0 0 1 15 7a3.6 3.6 0 0 1 .3 8.5H6z" /></svg>';
 
 function visibleGames() {
-  return games.filter(
-    (g) => !(onlyNoCloud && g.steam_cloud) && (!searchQuery || g.game.toLowerCase().includes(searchQuery)),
+  return allGames().filter(
+    (g) =>
+      !(onlyNoCloud && g.steam_cloud) &&
+      !(onlyLocalSaves && g.local_saves !== true) &&
+      (!searchQuery || g.game.toLowerCase().includes(searchQuery)),
   );
 }
 // appid → data: URL of the game's icon (see loadIcons).
@@ -148,6 +165,31 @@ async function loadGames() {
   }
 }
 
+function setOnlyLocalSaves(value) {
+  onlyLocalSaves = value;
+  try {
+    localStorage.setItem(LOCAL_ONLY_KEY, value ? "1" : "0");
+  } catch {}
+  loadGames();
+}
+
+// Cloud-only games: the cached list at once, then a fresh one from the
+// cloud (a few seconds). Icons are re-read if new games turned up.
+async function loadCloudGames() {
+  for (const cached of [true, false]) {
+    try {
+      const rows = await invoke("cloud_games", { cached });
+      const before = new Set(cloudOnly.map((g) => g.app_id));
+      cloudOnly = rows.map((r) => ({ ...r, cloud_only: true, local_saves: false, in_manifest: true, steam_cloud: false }));
+      renderGamesList();
+      if (selectedAppId !== null && cloudOnly.some((g) => g.app_id === selectedAppId)) renderDetailSettings();
+      if (!cached && cloudOnly.some((g) => !before.has(g.app_id))) loadIcons();
+    } catch (err) {
+      console.warn("loading cloud-only games failed:", err);
+    }
+  }
+}
+
 function setOnlyNoCloud(value) {
   onlyNoCloud = value;
   try {
@@ -205,10 +247,10 @@ function gameIcon(g, large = false) {
 
 function renderGamesList() {
   gamesListEl.innerHTML = "";
-  if (visibleGames().length === 0 && games.length > 0) {
+  if (visibleGames().length === 0 && allGames().length > 0) {
     const empty = document.createElement("p");
     empty.className = "muted list-empty";
-    empty.textContent = searchQuery ? "No games match your search." : "Every installed game uses Steam Cloud.";
+    empty.textContent = searchQuery ? "No games match your search." : "No games match these filters.";
     gamesListEl.appendChild(empty);
   }
   for (const g of visibleGames()) {
@@ -219,7 +261,11 @@ function renderGamesList() {
       (g.app_id === selectedAppId ? " selected" : "") +
       (g.in_manifest ? "" : " unsupported") +
       (g.local_saves === false ? " no-saves" : "");
-    item.title = g.in_manifest ? g.game : `${g.game} — no save locations known for this game`;
+    item.title = g.cloud_only
+      ? `${g.game} — saves in the cloud; not installed on this computer`
+      : g.in_manifest
+        ? g.game
+        : `${g.game} — no save locations known for this game`;
     const text = document.createElement("span");
     text.className = "game-text";
     const name = document.createElement("span");
@@ -229,7 +275,11 @@ function renderGamesList() {
     sub.className = "game-sub";
     // Known location but nothing there yet (never played here, or saves
     // not restored yet).
-    sub.textContent = g.local_saves === false ? `No saves here · ${shortMode(g)}` : shortMode(g);
+    sub.textContent = g.cloud_only
+      ? `Not installed · from ${g.latest_machine ?? "another device"}`
+      : g.local_saves === false
+        ? `No saves here · ${shortMode(g)}`
+        : shortMode(g);
     text.append(name, sub);
     item.append(gameIcon(g), text);
     if (g.steam_cloud) {
@@ -248,7 +298,7 @@ function renderGamesList() {
 }
 
 function renderDetailIcon() {
-  const g = games.find((game) => game.app_id === selectedAppId);
+  const g = selectedGame();
   const slot = document.querySelector("#detail-icon");
   if (!g || !slot) return;
   const icon = gameIcon(g, true);
@@ -270,7 +320,7 @@ function showEmptyDetail() {
 }
 
 function renderDetailSettings() {
-  const g = games.find((game) => game.app_id === selectedAppId);
+  const g = selectedGame();
   if (!g) {
     showEmptyDetail();
     return;
@@ -280,6 +330,15 @@ function renderDetailSettings() {
 
   detailTitleEl.textContent = g.game;
   renderDetailIcon();
+  // Not installed: only its cloud versions (no settings, nothing to open,
+  // nowhere to restore to).
+  document.querySelector("#sync-card").classList.toggle("hidden", !!g.cloud_only);
+  document.querySelector("#locations-card").classList.toggle("hidden", !!g.cloud_only);
+  if (g.cloud_only) {
+    detailAppIdEl.textContent = `AppID ${g.app_id} · not installed on this computer — install it in Steam to restore these saves`;
+    detailWarningEl.classList.add("hidden");
+    return;
+  }
   detailAppIdEl.textContent =
     `AppID ${g.app_id} · ${g.effective_mode}` + (g.local_saves === false ? " · no saves on this computer yet" : "");
   // Set by the CLI when this game's save locations can't be mapped between
@@ -458,7 +517,9 @@ function renderVersionRow(v) {
 
   const restoreBtn = document.createElement("button");
   restoreBtn.textContent = "Restore";
-  restoreBtn.disabled = v.active;
+  const notInstalled = !!selectedGame()?.cloud_only;
+  restoreBtn.disabled = v.active || notInstalled;
+  if (notInstalled) restoreBtn.title = "Install the game to restore its saves";
   restoreBtn.addEventListener("click", async () => {
     setStatus(`restoring ${v.id}…`);
     try {
@@ -860,6 +921,12 @@ window.addEventListener("DOMContentLoaded", () => {
   const noCloudToggle = document.querySelector("#filter-no-cloud");
   noCloudToggle.checked = onlyNoCloud;
   noCloudToggle.addEventListener("change", () => setOnlyNoCloud(noCloudToggle.checked));
+  try {
+    onlyLocalSaves = localStorage.getItem(LOCAL_ONLY_KEY) === "1";
+  } catch {}
+  const localToggle = document.querySelector("#filter-local");
+  localToggle.checked = onlyLocalSaves;
+  localToggle.addEventListener("change", () => setOnlyLocalSaves(localToggle.checked));
   // Filters the list only; the selected game stays open.
   const searchEl = document.querySelector("#game-search");
   searchEl.addEventListener("input", () => {
@@ -870,6 +937,7 @@ window.addEventListener("DOMContentLoaded", () => {
   loadTheme();
   loadAccentColor();
   loadGames().then(loadIcons);
+  loadCloudGames();
   loadUpdateSettings();
   if (autoUpdateEnabled()) checkForUpdate(false);
   setInterval(() => {

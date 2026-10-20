@@ -8,6 +8,7 @@ import {
   Navigation,
   PanelSection,
   PanelSectionRow,
+  ProgressBarWithInfo,
   Spinner,
   TextField,
   ToggleField,
@@ -42,6 +43,8 @@ interface DaemonState {
   syncing?: boolean;
   /** The game being synced; null while syncing every game. */
   syncing_game?: number | null;
+  /** What the sync is doing: "checking" | "uploading" | "downloading". */
+  sync_phase?: string | null;
   running_game?: number | null;
   pending_sync?: number[];
   watching_games?: number;
@@ -72,12 +75,43 @@ interface Game {
   steam_cloud: boolean;
   /** Save files exist on this Deck; null when the location isn't known. */
   local_saves: boolean | null;
+  /** Saves in the cloud, game not installed on this Deck (from `get_cloud_games`). */
+  cloud_only?: boolean;
+  latest_machine?: string | null;
   cross_os_note: string | null;
   last_version: string | null;
   synced_at: number | null;
   keep: number | null;
   default_keep: number;
 }
+
+/** One row of `yasgm cloud-games --json`. */
+interface CloudGame {
+  app_id: number;
+  game: string;
+  versions: number;
+  latest_at: number | null;
+  latest_machine: string | null;
+  latest_os: string | null;
+}
+
+/** A cloud-only game as a list row: its versions can be browsed, nothing else. */
+const cloudRow = (c: CloudGame): Game => ({
+  app_id: c.app_id,
+  game: c.game,
+  mode: "off",
+  effective_mode: "Not installed on this Deck",
+  in_manifest: true,
+  steam_cloud: false,
+  local_saves: false,
+  cloud_only: true,
+  latest_machine: c.latest_machine,
+  cross_os_note: null,
+  last_version: null,
+  synced_at: null,
+  keep: null,
+  default_keep: 10,
+});
 
 /** One entry of the daemon's event log (`watch send events`). */
 interface SyncEvent {
@@ -110,10 +144,12 @@ type AuthEvent =
   | { event: "not_needed"; detail: string }
   | { event: "error"; message: string };
 
-const getStatus = callable<[], Status>("get_status");
+// `fresh: false` answers from the backend's cache (instant once warm).
+const getStatus = callable<[fresh: boolean], Status>("get_status");
 const getDaemonState = callable<[], DaemonState>("get_daemon_state");
-const getGames = callable<[], Game[]>("get_games");
-const getIcons = callable<[], Record<string, string>>("get_icons");
+const getGames = callable<[fresh: boolean], Game[]>("get_games");
+const getCloudGames = callable<[fresh: boolean], CloudGame[]>("get_cloud_games");
+const getIcons = callable<[fresh: boolean], Record<string, string>>("get_icons");
 const checkUpdate = callable<[force: boolean], UpdateInfo>("check_update");
 const getVersions = callable<[appId: number], Version[]>("get_versions");
 const syncNow = callable<[appId: number], string>("sync_now");
@@ -223,6 +259,8 @@ const muted = { fontSize: "12px", color: "#8b929a" };
 
 const NO_CLOUD_KEY = "yasgm-only-no-steam-cloud";
 
+const LOCAL_ONLY_KEY = "yasgm-only-local-saves";
+
 function loadOnlyNoCloud() {
   try {
     return localStorage.getItem(NO_CLOUD_KEY) === "1";
@@ -231,6 +269,46 @@ function loadOnlyNoCloud() {
   }
 }
 
+/** "Only with saves here" — on unless turned off. */
+function loadOnlyLocal() {
+  try {
+    return localStorage.getItem(LOCAL_ONLY_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/** Installed games and cloud-only ones: the backend's cached lists at once,
+ *  then fresh ones. `reload(true)` re-reads after an action. */
+function useGameLists() {
+  const [games, setGames] = useState<Game[] | null>(null);
+  const [cloud, setCloud] = useState<Game[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(async (fresh: boolean) => {
+    const loadGames = getGames(fresh)
+      .then((g) => {
+        setGames(g);
+        setError(null);
+      })
+      .catch((err) => setError(errorText(err)));
+    const loadCloud = getCloudGames(fresh)
+      .then((c) => setCloud(c.map(cloudRow)))
+      .catch(() => {});
+    await Promise.all([loadGames, loadCloud]);
+  }, []);
+  useEffect(() => {
+    reload(false).then(() => reload(true));
+  }, []);
+  return { games, cloud, error, reload };
+}
+
+const PHASE_TEXT: Record<string, string> = {
+  checking: "Checking saves…",
+  uploading: "Uploading saves…",
+  downloading: "Downloading newer saves…",
+};
+const phaseText = (d: DaemonState | null) => PHASE_TEXT[d?.sync_phase ?? ""] ?? "Syncing…";
+
 // Icons rarely change: fetched once per session, shared by every view.
 let iconCache: Record<string, string> = {};
 let iconLoad: Promise<void> | null = null;
@@ -238,7 +316,7 @@ let iconLoad: Promise<void> | null = null;
 function useIcons() {
   const [icons, setIcons] = useState(iconCache);
   useEffect(() => {
-    iconLoad ??= getIcons()
+    iconLoad ??= getIcons(false)
       .then((found) => {
         iconCache = found;
       })
@@ -434,34 +512,31 @@ function SignIn({ onDone }: { onDone: () => void }) {
 
 function Content() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [games, setGames] = useState<Game[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { games, cloud, error, reload } = useGameLists();
   const [busy, setBusy] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [query, setQuery] = useState("");
   const [onlyNoCloud, setOnlyNoCloud] = useState(loadOnlyNoCloud);
+  const [onlyLocal, setOnlyLocal] = useState(loadOnlyLocal);
   const [updates, setUpdates] = useState<UpdateInfo | null>(null);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const icons = useIcons();
 
-  const refreshGames = useCallback(() => {
-    getGames().then(setGames).catch(() => {});
-  }, []);
-  const daemon = useDaemonState(refreshGames);
+  const daemon = useDaemonState(() => reload(true));
 
-  const refresh = useCallback(async () => {
-    try {
-      const [s, g] = await Promise.all([getStatus(), getGames()]);
-      setStatus(s);
-      setGames(g);
-      setError(null);
-    } catch (err) {
-      setError(errorText(err));
-    }
+  // Everything loads independently: nothing waits for the slow parts.
+  const refresh = useCallback(async (fresh = true) => {
+    getStatus(fresh)
+      .then(setStatus)
+      .catch(() => {});
+    await reload(fresh);
   }, []);
 
   useEffect(() => {
-    refresh();
+    getStatus(false)
+      .then(setStatus)
+      .then(() => getStatus(true).then(setStatus))
+      .catch(() => {});
     checkUpdate(false)
       .then(setUpdates)
       .catch(() => {});
@@ -498,10 +573,24 @@ function Content() {
     } catch {}
   };
 
+  const toggleOnlyLocal = (value: boolean) => {
+    setOnlyLocal(value);
+    try {
+      localStorage.setItem(LOCAL_ONLY_KEY, value ? "1" : "0");
+    } catch {}
+  };
+
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (games ?? []).filter((g) => !(onlyNoCloud && g.steam_cloud) && (!q || g.game.toLowerCase().includes(q)));
-  }, [games, query, onlyNoCloud]);
+    return [...(games ?? []), ...cloud]
+      .filter(
+        (g) =>
+          !(onlyNoCloud && g.steam_cloud) &&
+          !(onlyLocal && g.local_saves !== true) &&
+          (!q || g.game.toLowerCase().includes(q)),
+      )
+      .sort((a, b) => a.game.localeCompare(b.game, undefined, { sensitivity: "base" }));
+  }, [games, cloud, query, onlyNoCloud, onlyLocal]);
 
   const running = !!daemon?.running;
   const paused = daemon?.paused ?? false;
@@ -602,6 +691,9 @@ function Content() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <ToggleField label="Only with saves here" checked={onlyLocal} onChange={toggleOnlyLocal} />
+        </PanelSectionRow>
+        <PanelSectionRow>
           <ToggleField label="Only without Steam Cloud" checked={onlyNoCloud} onChange={toggleOnlyNoCloud} />
         </PanelSectionRow>
         {!games && !error && (
@@ -616,7 +708,10 @@ function Content() {
         )}
         {!!games?.length && shown.length === 0 && (
           <PanelSectionRow>
-            <Field label={query.trim() ? "No games match your search" : "Every installed game uses Steam Cloud"} />
+            <Field
+              label={query.trim() ? "No games match your search" : "No games match these filters"}
+              description={onlyLocal && !query.trim() ? "Turn off “Only with saves here” to see every game" : undefined}
+            />
           </PanelSectionRow>
         )}
         {shown.map((g) => {
@@ -627,7 +722,9 @@ function Content() {
                 layout="below"
                 description={
                   syncingThis
-                    ? "Syncing…"
+                    ? phaseText(daemon)
+                    : g.cloud_only
+                      ? `Not installed · from ${g.latest_machine ?? "another device"}`
                     : [
                         g.local_saves === false && "No saves here",
                         shortMode(g),
@@ -715,7 +812,8 @@ function Content() {
 function GamePage() {
   const { appId } = useParams<{ appId: string }>();
   const id = Number(appId);
-  const [game, setGame] = useState<Game | null>(null);
+  const { games, cloud, reload } = useGameLists();
+  const game = useMemo(() => [...(games ?? []), ...cloud].find((g) => g.app_id === id) ?? null, [games, cloud, id]);
   const [versions, setVersions] = useState<Version[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -723,8 +821,6 @@ function GamePage() {
 
   const load = useCallback(async () => {
     try {
-      const games = await getGames();
-      setGame(games.find((g) => g.app_id === id) ?? null);
       const list = await getVersions(id);
       setVersions(list.sort((a, b) => b.created - a.created));
       setError(null);
@@ -737,7 +833,10 @@ function GamePage() {
     load();
   }, [id]);
   // A finished sync may have added a version.
-  const daemon = useDaemonState(load);
+  const daemon = useDaemonState(() => {
+    load();
+    reload(true);
+  });
   const syncingThis = !!daemon?.syncing && (daemon.syncing_game === id || daemon.syncing_game == null);
 
   const act = async (action: () => Promise<string>) => {
@@ -750,6 +849,7 @@ function GamePage() {
     } finally {
       setBusy(false);
       load();
+      reload(true);
     }
   };
 
@@ -773,22 +873,23 @@ function GamePage() {
             <div style={muted}>
               {game.effective_mode}
               {game.steam_cloud && " · Steam Cloud already syncs this game"}
-              {game.local_saves === false && " · no saves on this Deck yet"}
+              {game.local_saves === false && !game.cloud_only && " · no saves on this Deck yet"}
+              {game.cloud_only && " — install it to restore these saves"}
             </div>
           )}
         </div>
-        {syncingThis && (
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, color: TONES.busy }}>
-            <Spinner style={{ width: 18, height: 18 }} /> Syncing…
-          </div>
-        )}
       </div>
+      {syncingThis && (
+        <div style={{ margin: "12px 0" }}>
+          <ProgressBarWithInfo indeterminate sOperationText={phaseText(daemon)} />
+        </div>
+      )}
       {game?.cross_os_note && (
         <div style={{ ...muted, color: "#e8b45f", margin: "8px 0" }}>Cross-platform restore: {game.cross_os_note}.</div>
       )}
       {error && <div style={{ color: "#ff6b6b", margin: "8px 0" }}>{error}</div>}
 
-      {game && (
+      {game && !game.cloud_only && (
         <Focusable style={{ display: "flex", gap: 12, margin: "16px 0" }}>
           <div style={{ flex: 1 }}>
             <DropdownItem
@@ -836,7 +937,7 @@ function GamePage() {
               {v.machine} · {v.os} · {v.files} files · {humanBytes(v.size)}
             </div>
           </div>
-          <DialogButton style={{ width: 120 }} disabled={busy || v.active} onClick={() => confirmRestore(v)}>
+          <DialogButton style={{ width: 120 }} disabled={busy || v.active || !!game?.cloud_only} onClick={() => confirmRestore(v)}>
             Restore
           </DialogButton>
           <DialogButton style={{ width: 100 }} disabled={busy} onClick={() => act(() => setPinned(id, v.id, !v.pinned))}>

@@ -57,6 +57,7 @@ pub fn sync_game(
         let _ = store.flush_pending(game.app_id, keep);
     }
 
+    crate::activity::set("checking");
     let local = snapshot::capture(files, game, os)?;
     let index = store.load_index(game.app_id)?;
     let head = index.as_ref().and_then(Store::head).cloned();
@@ -74,6 +75,7 @@ pub fn sync_game(
                 discard(&snap);
                 return Ok((Outcome::DryRun("would upload first version"), None));
             }
+            crate::activity::set("uploading");
             let version = store.push(&game.name, game.app_id, &snap, os.name(), keep, false)?;
             let update = Some((version.id.clone(), version.content_hash.clone()));
             Ok((Outcome::Uploaded(version), update))
@@ -87,6 +89,7 @@ pub fn sync_game(
             if dry_run {
                 return Ok((Outcome::DryRun("would download head (no local data)"), None));
             }
+            crate::activity::set("downloading");
             let bytes = store.download_version(game.app_id, &head)?;
             let files_written = snapshot::extract(&bytes, &head.mounts, files, os, Os::from_name(&head.os), game, false)?;
             let update = Some((head.id.clone(), head.content_hash.clone()));
@@ -125,9 +128,11 @@ pub fn sync_game(
                     discard(&snap);
                     None
                 } else {
+                    crate::activity::set("uploading");
                     let v = store.push(&game.name, game.app_id, &snap, os.name(), keep, true)?;
                     Some(v.id)
                 };
+                crate::activity::set("downloading");
                 let bytes = store.download_version(game.app_id, &head)?;
                 let files_written = snapshot::extract(&bytes, &head.mounts, files, os, Os::from_name(&head.os), game, false)?;
                 let update = Some((head.id.clone(), head.content_hash.clone()));
@@ -147,6 +152,7 @@ pub fn sync_game(
                     discard(&snap);
                     return Ok((Outcome::DryRun("would upload local changes"), None));
                 }
+                crate::activity::set("uploading");
                 let version = store.push(&game.name, game.app_id, &snap, os.name(), keep, false)?;
                 let update = Some((version.id.clone(), version.content_hash.clone()));
                 return Ok((Outcome::Uploaded(version), update));
@@ -160,6 +166,7 @@ pub fn sync_game(
                 return Ok((Outcome::DryRun("conflict: would pin cloud head and upload local"), None));
             }
             store.set_pinned(game.app_id, &head.id, true)?;
+            crate::activity::set("uploading");
             let version = store.push(&game.name, game.app_id, &snap, os.name(), keep, false)?;
             let update = Some((version.id.clone(), version.content_hash.clone()));
             Ok((Outcome::Conflict { uploaded: version, pinned: head.id }, update))

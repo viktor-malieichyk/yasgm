@@ -136,16 +136,46 @@ impl Store {
 
     fn load_index_from(&self, provider: &dyn Provider, app_id: u64) -> Result<Option<Index>> {
         let rel = format!("{}/index.json", self.game_base(app_id));
-        if !provider.exists(&rel)? {
-            return Ok(None);
+        match provider.download_if_exists(&rel)? {
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes).context("parsing index.json")?)),
+            None => Ok(None),
         }
-        let bytes = provider.download(&rel)?;
-        Ok(Some(serde_json::from_slice(&bytes).context("parsing index.json")?))
     }
 
     fn save_index_to(&self, provider: &dyn Provider, index: &Index) -> Result<()> {
         let rel = format!("{}/index.json", self.game_base(index.app_id));
         provider.upload(&rel, &serde_json::to_vec_pretty(index)?)
+    }
+
+    /// Steam accounts with a folder in the cloud, besides this store's one,
+    /// and how many games each has.
+    pub fn other_accounts(&self) -> Result<Vec<(String, usize)>> {
+        let mut out = Vec::new();
+        for account in self.primary.list("accounts")? {
+            if account == self.account {
+                continue;
+            }
+            let games = self.primary.list(&format!("accounts/{account}/games"))?;
+            out.push((account, games.iter().filter(|g| g.parse::<u64>().is_ok()).count()));
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Every game with saves in the cloud for this account (or stranded in
+    /// the local pending store), including games not installed here.
+    pub fn cloud_app_ids(&self) -> Result<Vec<u64>> {
+        let base = format!("accounts/{}/games", self.account);
+        let mut ids: Vec<u64> = self
+            .primary
+            .list(&base)?
+            .into_iter()
+            .chain(self.pending.list(&base).unwrap_or_default())
+            .filter_map(|name| name.parse().ok())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// Merged view across the primary provider and any local pending
@@ -409,6 +439,70 @@ impl Store {
         self.save_index_to(provider, &index)
     }
 
+    /// Copies one game's cloud versions from another account's store into
+    /// this one — for saves a device uploaded under the wrong Steam account.
+    /// Each zip is read back and compared before the index is written, and
+    /// versions already here (same id) are skipped. If both sides have an
+    /// active head, the older one is pinned (the conflict rule, D5), so
+    /// nothing is lost and the newer saves win. Returns how many versions
+    /// were (or, with `dry_run`, would be) copied.
+    pub fn import_game(&self, source: &Store, app_id: u64, dry_run: bool) -> Result<usize> {
+        let Some(src) = source.load_index_from(&*source.primary, app_id)? else {
+            return Ok(0);
+        };
+        let mut dest = self.load_index_from(&*self.primary, app_id)?.unwrap_or_else(|| Index {
+            schema: src.schema,
+            game: src.game.clone(),
+            app_id,
+            versions: Vec::new(),
+        });
+        let heads = (Store::head(&dest).cloned(), Store::head(&src).cloned());
+        let mut copied = 0;
+        for version in &src.versions {
+            if dest.versions.iter().any(|d| d.id == version.id) {
+                continue;
+            }
+            if !dry_run {
+                let from = format!("{}/versions/{}.zip", source.game_base(app_id), version.id);
+                let to = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
+                let bytes = source.primary.download(&from)?;
+                self.primary.upload(&to, &bytes)?;
+                if self.primary.download(&to)? != bytes {
+                    anyhow::bail!("{}: copy of version {} doesn't match the original", src.game, version.id);
+                }
+            }
+            dest.versions.push(version.clone());
+            copied += 1;
+        }
+        if let (Some(ours), Some(theirs)) = heads {
+            let older = if ours.created <= theirs.created { ours.id } else { theirs.id };
+            if let Some(v) = dest.versions.iter_mut().find(|v| v.id == older) {
+                v.pinned = true;
+            }
+        }
+        if !dry_run && copied > 0 {
+            self.save_index_to(&*self.primary, &dest)?;
+        }
+        Ok(copied)
+    }
+
+    /// Deletes one game's versions and index from this account's cloud.
+    /// Only used after `import_game` copied them elsewhere.
+    pub fn delete_game(&self, app_id: u64) -> Result<()> {
+        let Some(index) = self.load_index_from(&*self.primary, app_id)? else {
+            return Ok(());
+        };
+        for version in &index.versions {
+            self.primary.delete(&format!("{}/versions/{}.zip", self.game_base(app_id), version.id))?;
+        }
+        self.primary.delete(&format!("{}/index.json", self.game_base(app_id)))
+    }
+
+    /// Removes this account's (now empty) folder from the cloud, best effort.
+    pub fn delete_account_folder(&self) {
+        let _ = self.primary.delete(&format!("accounts/{}", self.account));
+    }
+
     pub fn download_version(&self, app_id: u64, version: &Version) -> Result<Vec<u8>> {
         let provider: &dyn Provider = if version.pending { &*self.pending } else { &*self.primary };
         let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
@@ -436,6 +530,9 @@ mod tests {
             anyhow::bail!("simulated offline")
         }
         fn delete(&self, _rel: &str) -> Result<()> {
+            anyhow::bail!("simulated offline")
+        }
+        fn list(&self, _rel: &str) -> Result<Vec<String>> {
             anyhow::bail!("simulated offline")
         }
     }
@@ -479,6 +576,68 @@ mod tests {
         assert_eq!(bytes, b"zip-bytes");
 
         fs::remove_dir_all(&pending_root).ok();
+    }
+
+    #[test]
+    fn cloud_app_ids_lists_primary_and_pending_games() {
+        let primary_root = scratch_dir("primary");
+        let pending_root = scratch_dir("pending");
+        let online = Store::with_providers(
+            Box::new(LocalFolderProvider::new(primary_root.clone())),
+            Box::new(LocalFolderProvider::new(pending_root.clone())),
+            "acct".to_owned(),
+        );
+        assert!(online.cloud_app_ids().unwrap().is_empty(), "no games folder yet");
+        online.push_raw("Game", 42, b"zip", "h1", 1, mounts(), "mac", 10, false).unwrap();
+        // Another game captured while offline lands in the pending store.
+        let offline = Store::with_providers(
+            Box::new(AlwaysFailProvider),
+            Box::new(LocalFolderProvider::new(pending_root.clone())),
+            "acct".to_owned(),
+        );
+        offline.push_raw("Other", 7, b"zip", "h2", 1, mounts(), "mac", 10, false).unwrap();
+        assert_eq!(online.cloud_app_ids().unwrap(), vec![7, 42]);
+        fs::remove_dir_all(&primary_root).ok();
+        fs::remove_dir_all(&pending_root).ok();
+    }
+
+    #[test]
+    fn import_game_merges_accounts_and_pins_the_older_head() {
+        let cloud = scratch_dir("cloud");
+        let pending = scratch_dir("pending");
+        let store = |account: &str| {
+            Store::with_providers(
+                Box::new(LocalFolderProvider::new(cloud.clone())),
+                Box::new(LocalFolderProvider::new(pending.clone())),
+                account.to_owned(),
+            )
+        };
+        let (wrong, right) = (store("wrong"), store("right"));
+        wrong.push_raw("Moved", 1, b"deck-only", "h1", 1, mounts(), "linux", 10, false).unwrap();
+        right.push_raw("Both", 2, b"mac", "h2", 1, mounts(), "macos", 10, false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // version ids are per second
+        wrong.push_raw("Both", 2, b"deck-newer", "h3", 1, mounts(), "linux", 10, false).unwrap();
+
+        assert_eq!(right.import_game(&wrong, 1, true).unwrap(), 1, "dry run counts");
+        assert!(right.load_index(1).unwrap().is_none(), "dry run writes nothing");
+
+        assert_eq!(right.import_game(&wrong, 1, false).unwrap(), 1);
+        assert_eq!(right.import_game(&wrong, 2, false).unwrap(), 1);
+        let moved = right.load_index(1).unwrap().unwrap();
+        assert_eq!(right.download_version(1, &moved.versions[0]).unwrap(), b"deck-only");
+        let both = right.load_index(2).unwrap().unwrap();
+        assert_eq!(both.versions.len(), 2);
+        let head = Store::head(&both).unwrap();
+        assert_eq!(right.download_version(2, head).unwrap(), b"deck-newer", "newer saves win");
+        assert!(both.versions.iter().any(|v| v.pinned && v.os == "macos"), "older head kept, pinned");
+        assert_eq!(right.import_game(&wrong, 2, false).unwrap(), 0, "already imported");
+
+        wrong.delete_game(1).unwrap();
+        wrong.delete_game(2).unwrap();
+        assert!(wrong.load_index(1).unwrap().is_none());
+        assert!(wrong.load_index(2).unwrap().is_none());
+        fs::remove_dir_all(&cloud).ok();
+        fs::remove_dir_all(&pending).ok();
     }
 
     #[test]

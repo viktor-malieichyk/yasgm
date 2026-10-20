@@ -1410,6 +1410,47 @@ and fast until the release is otherwise ready). Status is tracked inline.
    played here, or not restored yet) get a greyed-out icon and a "No saves
    here" subtitle, in the desktop GUI and the Decky panel; the detail
    header / game page say "no saves on this computer/Deck yet".
+   **Wrong Steam account found + cloud-only games (2026-10-21).** The owner
+   saw saves in OneDrive (e.g. Dark Souls II) that no client showed. Cause:
+   the cloud namespace (D4) was `account_ids().first()` — the lowest
+   `userdata` folder *as text* — so a device where two accounts had signed
+   in (the Deck, machine name "machine") uploaded 31 games under the other
+   account `1291627233`. Fix: `steam::current_account` = the
+   `config/loginusers.vdf` user with `MostRecent`, else the newest
+   `timestamp` (SteamID64 − 76561197960265728), falling back to the old
+   pick only without that file (unit-tested, incl. both orders). Repair:
+   `yasgm move-account <from> [--to <acct>] [--dry-run] [--keep-source]`
+   (`Store::import_game`: copies each zip, reads it back and compares
+   before writing the index; ids already present are skipped; if both sides
+   have a head the older is pinned — the D5 conflict rule; then
+   `delete_game` + the account folder unless `--keep-source`). Run with
+   `--keep-source` (6.5 min for 31 games); the originals are deleted after
+   the Deck runs the fixed build (otherwise it keeps uploading there).
+   `cloud-games [--json|--cached] [--account]`: games with cloud saves not
+   installed here (Provider gained `list`; `Store::cloud_app_ids`,
+   `other_accounts` → a note when another account has saves); each run
+   caches to `<cache>/yasgm/cloud-games.json`, `--cached` prints it in
+   17 ms. `icons` also covers cached cloud-only games. Speed: one shared
+   `ureq::Agent` for every Microsoft call (connection reuse — every request
+   used to do a fresh TLS handshake), `Provider::download_if_exists`
+   (index load 3 → 2 requests), 8 parallel index loads (16 got throttled:
+   20–30 s): 28 games 11.7 s → ~5.5 s. GUI + Deck: cloud-only rows
+   ("Not installed · from <machine>", greyed icon); their page shows the
+   versions only (Restore disabled: install the game first). New switch
+   **"Only with saves here"** (hides no-local-save and cloud-only games):
+   off by default on desktop, **on by default in the Deck panel**.
+   **Deck panel speed:** it waited for `status --json` (a OneDrive check)
+   *and* `games --json` (17 MB manifest parse) before showing anything. Now
+   the backend warms caches for games / icons / status / cloud games when
+   the plugin loads and answers from them (`fresh=false`); the panel
+   renders the cached lists immediately and refreshes behind them; nothing
+   waits on anything else; the games cache refreshes after each sync event
+   batch. Locally: cached answers < 10 ms. **Sync phase:** new
+   `src/activity.rs` — the engine sets checking / uploading / downloading,
+   `status` reports `sync_phase`; the Deck game page shows an indeterminate
+   `ProgressBarWithInfo` with that text while its game syncs (a byte-level
+   bar wouldn't move: save zips upload in one request), rows say
+   "Uploading saves…" etc.
 6. **SteamOS validation** — first in the **steamac VM** on the dev Mac (see
    [Test environment](#test-environment-steamac-vm)), then real Deck
    hardware for what the VM can't cover (carry-over from Phase 2):

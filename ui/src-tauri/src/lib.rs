@@ -76,6 +76,16 @@ async fn list_games(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
 }
 
+/// Games with cloud saves that aren't installed here (`yasgm cloud-games
+/// --json`); `cached` returns the last result instantly instead of asking
+/// the cloud (a few seconds).
+#[tauri::command]
+async fn cloud_games(app: AppHandle, cached: bool) -> Result<Vec<serde_json::Value>, String> {
+    let args: &[&str] = if cached { &["cloud-games", "--cached"] } else { &["cloud-games", "--json"] };
+    let stdout = run_yasgm(&app, args).await?;
+    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+}
+
 /// appid → `data:` URL of the game's icon, from `yasgm icons --json --embed`
 /// (Steam's local image cache, plus a one-time download for the rest unless
 /// `offline`). Games without any icon are left out.
@@ -461,6 +471,7 @@ pub fn run() {
             game_icons,
             restore_version,
             list_games,
+            cloud_games,
             set_game_config,
             clear_game_config,
             set_pinned,

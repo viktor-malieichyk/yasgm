@@ -220,6 +220,10 @@ class Plugin:
     sign_in = None  # running `yasgm auth --device --json`
     updates = None  # last update_info()
     announced = None  # update version already toasted
+    # Slow CLI answers (manifest parse, cloud requests), kept so the panel
+    # opens instantly: the cached copy first, a fresh one right after.
+    cache = None
+    refreshing = None
 
     # ---- daemon lifecycle -------------------------------------------------
 
@@ -229,6 +233,39 @@ class Plugin:
         self.loop.create_task(self._supervise_daemon())
         self.loop.create_task(self._relay_sync_events())
         self.loop.create_task(self._watch_for_updates())
+        self.cache = {}
+        self.refreshing = {}
+        # Warm the caches the panel needs, so opening it the first time is quick.
+        for name in ("games", "icons", "status", "cloud_games"):
+            self.loop.create_task(self._refresh(name))
+
+    _QUERIES = {
+        "games": (("games", "--json"), 120),
+        "icons": (("icons", "--json", "--embed"), 120),
+        "status": (("status", "--json"), 60),
+        "cloud_games": (("cloud-games", "--json"), 120),
+    }
+
+    async def _refresh(self, name: str):
+        """Runs one slow query and caches its result; concurrent callers
+        share the same run."""
+        running = self.refreshing.get(name)
+        if running is None or running.done():
+            args, timeout = self._QUERIES[name]
+            running = self.loop.create_task(run_json(*args, timeout=timeout))
+            self.refreshing[name] = running
+        try:
+            self.cache[name] = await asyncio.shield(running)
+        except Exception as err:
+            if name not in self.cache:
+                raise
+            decky.logger.info(f"refreshing {name} failed, keeping the cached copy: {err}")
+        return self.cache[name]
+
+    async def _cached(self, name: str, fresh: bool):
+        if not fresh and name in self.cache:
+            return self.cache[name]
+        return await self._refresh(name)
 
     async def _watch_for_updates(self):
         """Checks GitHub for a newer plugin release shortly after start and
@@ -263,6 +300,8 @@ class Plugin:
                 # One batch per poll, so the frontend can merge a burst (e.g.
                 # the daemon's first pass) into a single toast.
                 await decky.emit("yasgm_sync_events", reply["events"])
+                # Last-synced times and local saves changed.
+                self.loop.create_task(self._refresh("games"))
             since = seq
 
     async def _supervise_daemon(self):
@@ -315,15 +354,10 @@ class Plugin:
 
     # ---- queries ----------------------------------------------------------
 
-    async def get_status(self) -> dict:
-        """`status --json` plus the daemon's own state when it's reachable."""
-        status = await run_json("status", "--json", timeout=60)
-        if status.get("daemon", {}).get("running"):
-            try:
-                status["watch"] = json.loads(await run("watch", "send", "status", timeout=15))
-            except Exception as err:
-                status["watch_error"] = str(err)
-        return status
+    async def get_status(self, fresh: bool = False) -> dict:
+        """`status --json` (provider + connection check; the daemon's live
+        state comes from `get_daemon_state`)."""
+        return await self._cached("status", fresh)
 
     async def get_daemon_state(self) -> dict:
         """The daemon's live state straight from its socket — cheap enough to
@@ -336,13 +370,23 @@ class Plugin:
         state["running"] = True
         return state
 
-    async def get_games(self) -> list:
-        return await run_json("games", "--json")
+    async def get_games(self, fresh: bool = False) -> list:
+        return await self._cached("games", fresh)
 
-    async def get_icons(self) -> dict:
+    async def get_cloud_games(self, fresh: bool = False) -> list:
+        """Games with cloud saves that aren't installed on this Deck."""
+        if not fresh and "cloud_games" not in self.cache:
+            # Before the first cloud answer: yasgm's own cached copy.
+            try:
+                return await run_json("cloud-games", "--cached", timeout=15)
+            except Exception:
+                return []
+        return await self._cached("cloud_games", fresh)
+
+    async def get_icons(self, fresh: bool = False) -> dict:
         """appid → data: URL of the game's icon (Steam's cache, else
         downloaded once into yasgm's cache)."""
-        icons = await run_json("icons", "--json", "--embed", timeout=90)
+        icons = await self._cached("icons", fresh)
         return {str(i["app_id"]): i["data_url"] for i in icons if i.get("data_url")}
 
     async def check_update(self, force: bool = False) -> dict:

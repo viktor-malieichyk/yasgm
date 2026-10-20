@@ -35,6 +35,19 @@ pub struct Tokens {
     pub expires_at: u64,
 }
 
+/// One agent for every Microsoft request, so connections (and their TLS
+/// handshakes) are reused across calls — a fresh `ureq::get` per request
+/// made each Graph call pay a full handshake.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(15))
+            .timeout_read(std::time::Duration::from_secs(120))
+            .build()
+    })
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -91,7 +104,7 @@ struct TokenResponse {
 /// Inner `Err` carries the OAuth error code (e.g. `authorization_pending`),
 /// which callers may treat as non-fatal.
 fn token_request(params: &[(&str, &str)]) -> Result<std::result::Result<TokenResponse, String>> {
-    let body = match ureq::post(TOKEN_URL).send_form(params) {
+    let body = match agent().post(TOKEN_URL).send_form(params) {
         Ok(resp) => resp.into_string()?,
         Err(ureq::Error::Status(_, resp)) => {
             let body = resp.into_string().unwrap_or_default();
@@ -268,7 +281,7 @@ pub enum DeviceEvent<'a> {
 
 /// Device-code sign-in (Steam Deck Gaming Mode, SSH sessions, …).
 pub fn login_device(on_event: &dyn Fn(DeviceEvent)) -> Result<Tokens> {
-    let resp = ureq::post(DEVICE_CODE_URL)
+    let resp = agent().post(DEVICE_CODE_URL)
         .send_form(&[("client_id", CLIENT_ID), ("scope", SCOPES)])
         .context("requesting device code")?;
     let dc: DeviceCodeResponse = serde_json::from_str(&resp.into_string()?)?;
@@ -339,7 +352,7 @@ pub fn ensure_access_token() -> Result<String> {
 }
 
 pub fn graph_get(access_token: &str, path: &str) -> Result<serde_json::Value> {
-    match ureq::get(&format!("{GRAPH}{path}"))
+    match agent().get(&format!("{GRAPH}{path}"))
         .set("Authorization", &format!("Bearer {access_token}"))
         .call()
     {
@@ -364,7 +377,7 @@ fn bearer(access_token: &str) -> String {
 
 /// Item metadata, or None if the path doesn't exist.
 pub fn item_get(access_token: &str, rel: &str) -> Result<Option<serde_json::Value>> {
-    match ureq::get(&approot_url(rel, ""))
+    match agent().get(&approot_url(rel, ""))
         .set("Authorization", &bearer(access_token))
         .call()
     {
@@ -377,20 +390,50 @@ pub fn item_get(access_token: &str, rel: &str) -> Result<Option<serde_json::Valu
     }
 }
 
+/// Names of a folder's children (all pages); empty if it doesn't exist.
+pub fn list_children(access_token: &str, rel: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut url = approot_url(rel, ":/children?$select=name&$top=999");
+    loop {
+        let page: serde_json::Value = match agent().get(&url).set("Authorization", &bearer(access_token)).call() {
+            Ok(resp) => serde_json::from_str(&resp.into_string()?)?,
+            Err(ureq::Error::Status(404, _)) => return Ok(names),
+            Err(ureq::Error::Status(code, resp)) => {
+                bail!("Graph list {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
+            }
+            Err(err) => return Err(err).context("Graph unreachable"),
+        };
+        if let Some(items) = page["value"].as_array() {
+            names.extend(items.iter().filter_map(|i| i["name"].as_str().map(str::to_owned)));
+        }
+        match page["@odata.nextLink"].as_str() {
+            Some(next) => url = next.to_owned(),
+            None => return Ok(names),
+        }
+    }
+}
+
 pub fn download(access_token: &str, rel: &str) -> Result<Vec<u8>> {
-    let item = item_get(access_token, rel)?
-        .with_context(|| format!("{rel} not found in cloud"))?;
+    download_if_exists(access_token, rel)?.with_context(|| format!("{rel} not found in cloud"))
+}
+
+/// The file's bytes, or None if it doesn't exist (one lookup fewer than
+/// `item_get` + `download`).
+pub fn download_if_exists(access_token: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+    let Some(item) = item_get(access_token, rel)? else {
+        return Ok(None);
+    };
     // The pre-authorized download URL avoids auth-header issues on the CDN
     // redirect target.
     let url = item["@microsoft.graph.downloadUrl"]
         .as_str()
         .with_context(|| format!("no download URL for {rel}"))?;
-    let resp = ureq::get(url).call().context("downloading content")?;
+    let resp = agent().get(url).call().context("downloading content")?;
     let mut bytes = Vec::new();
     resp.into_reader()
         .read_to_end(&mut bytes)
         .context("reading download stream")?;
-    Ok(bytes)
+    Ok(Some(bytes))
 }
 
 const SIMPLE_UPLOAD_LIMIT: usize = 4_000_000;
@@ -416,7 +459,7 @@ impl std::error::Error for QuotaExceeded {}
 
 pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() <= SIMPLE_UPLOAD_LIMIT {
-        return match ureq::put(&approot_url(rel, ":/content"))
+        return match agent().put(&approot_url(rel, ":/content"))
             .set("Authorization", &bearer(access_token))
             .set("Content-Type", "application/octet-stream")
             .send_bytes(bytes)
@@ -432,7 +475,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
 
     // Large upload: resumable session, chunked.
     let session_body = r#"{"item":{"@microsoft.graph.conflictBehavior":"replace"}}"#;
-    let session: serde_json::Value = match ureq::post(&approot_url(rel, ":/createUploadSession"))
+    let session: serde_json::Value = match agent().post(&approot_url(rel, ":/createUploadSession"))
         .set("Authorization", &bearer(access_token))
         .set("Content-Type", "application/json")
         .send_string(session_body)
@@ -453,7 +496,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     while offset < total {
         let end = (offset + CHUNK).min(total);
         let range = format!("bytes {}-{}/{}", offset, end - 1, total);
-        match ureq::put(upload_url)
+        match agent().put(upload_url)
             .set("Content-Range", &range)
             .send_bytes(&bytes[offset..end])
         {
@@ -470,7 +513,7 @@ pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn delete(access_token: &str, rel: &str) -> Result<()> {
-    match ureq::delete(&approot_url(rel, ""))
+    match agent().delete(&approot_url(rel, ""))
         .set("Authorization", &bearer(access_token))
         .call()
     {
@@ -509,5 +552,13 @@ impl crate::provider::Provider for OneDriveProvider {
 
     fn delete(&self, rel: &str) -> Result<()> {
         delete(&self.access_token, rel)
+    }
+
+    fn list(&self, rel: &str) -> Result<Vec<String>> {
+        list_children(&self.access_token, rel)
+    }
+
+    fn download_if_exists(&self, rel: &str) -> Result<Option<Vec<u8>>> {
+        download_if_exists(&self.access_token, rel)
     }
 }

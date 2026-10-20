@@ -5,6 +5,7 @@
 mod autostart;
 mod config;
 mod control;
+mod activity;
 mod fsutil;
 mod gui;
 mod icons;
@@ -62,10 +63,7 @@ fn load_ctx() -> Result<Ctx> {
     let root = steam::find_steam_root().context("Steam installation not found")?;
     let libraries = steam::libraries(&root)?;
     let games = steam::installed_games(&libraries)?;
-    let account = steam::account_ids(&root)
-        .into_iter()
-        .next()
-        .context("no Steam account found in userdata")?;
+    let account = steam::current_account(&root).context("no Steam account found in userdata")?;
     Ok(Ctx { manifest, by_app_id, root, games, account, os: Os::current() })
 }
 
@@ -122,17 +120,14 @@ const NOT_CONNECTED: &str = "no cloud provider connected — sign in with `yasgm
 /// that only touch cloud versions).
 fn light_store() -> Result<(String, Store)> {
     let root = steam::find_steam_root().context("Steam installation not found")?;
-    let account = steam::account_ids(&root)
-        .into_iter()
-        .next()
-        .context("no Steam account found in userdata")?;
+    let account = steam::current_account(&root).context("no Steam account found in userdata")?;
     let store = build_store(account.clone(), &config::Config::load())?;
     Ok((account, store))
 }
 
 // ---- argument helpers -----------------------------------------------------
 
-const VALUED_FLAGS: [&str; 5] = ["--version", "--mode", "--keep", "--app", "--settle"];
+const VALUED_FLAGS: [&str; 7] = ["--version", "--mode", "--keep", "--app", "--settle", "--account", "--to"];
 
 fn positionals(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -734,10 +729,7 @@ fn backup_location_cmd(args: &[String]) -> Result<()> {
     let app_id = parse_app_id(args).context("usage: yasgm backup-location <appid>")?;
     let cfg = config::Config::load();
     let root = steam::find_steam_root().context("Steam installation not found")?;
-    let account = steam::account_ids(&root)
-        .into_iter()
-        .next()
-        .context("no Steam account found in userdata")?;
+    let account = steam::current_account(&root).context("no Steam account found in userdata")?;
     let json = match &cfg.provider {
         config::ProviderConfig::Onedrive => {
             let access_token = onedrive::ensure_access_token()?;
@@ -777,10 +769,7 @@ fn backup_location_cmd(args: &[String]) -> Result<()> {
 fn pending_location_cmd(args: &[String]) -> Result<()> {
     let app_id = parse_app_id(args).context("usage: yasgm pending-location <appid>")?;
     let root = steam::find_steam_root().context("Steam installation not found")?;
-    let account = steam::account_ids(&root)
-        .into_iter()
-        .next()
-        .context("no Steam account found in userdata")?;
+    let account = steam::current_account(&root).context("no Steam account found in userdata")?;
     let dir = store::pending_dir()?.join(format!("accounts/{account}/games/{app_id}"));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     println!("{}", serde_json::to_string(&serde_json::json!({"path": dir}))?);
@@ -1132,6 +1121,7 @@ impl DaemonState {
             "watching_games": self.watching_games,
             "syncing": self.syncing.is_some(),
             "syncing_game": self.syncing.flatten(),
+            "sync_phase": if self.syncing.is_some() { Some(activity::get()) } else { None },
         })
     }
 }
@@ -1144,7 +1134,9 @@ fn daemon_sync(state: &SharedState, only: Option<u64>) -> Result<()> {
         return Ok(());
     }
     lock_state(state).syncing = Some(only);
+    activity::set("checking");
     let result = run_sync(only, false);
+    activity::set("");
     let mut state = lock_state(state);
     state.syncing = None;
     match result {
@@ -1771,15 +1763,27 @@ fn versions_cmd(args: &[String]) -> Result<()> {
     let store = ctx.cloud_store()?;
     let mut json_out = Vec::new();
 
-    for game in ctx.games.iter().filter(|g| only.is_none_or(|id| id == g.app_id)) {
-        let Some(index) = store.load_index(game.app_id)? else {
+    // Installed games, or the one asked for even if it isn't installed here
+    // (its name then comes from the cloud index).
+    let mut targets: Vec<(u64, String)> = ctx
+        .games
+        .iter()
+        .filter(|g| only.is_none_or(|id| id == g.app_id))
+        .map(|g| (g.app_id, g.name.clone()))
+        .collect();
+    if let (Some(id), true) = (only, targets.is_empty()) {
+        targets.push((id, String::new()));
+    }
+    for (app_id, name) in targets {
+        let Some(index) = store.load_index(app_id)? else {
             if !json {
-                println!("{} ({}): no cloud versions", game.name, game.app_id);
+                println!("{name} ({app_id}): no cloud versions");
             }
             continue;
         };
+        let name = if name.is_empty() { index.game.clone() } else { name };
         if !json {
-            println!("{} ({}):", game.name, game.app_id);
+            println!("{name} ({app_id}):");
         }
         let head_id = Store::head(&index).map(|h| h.id.clone());
         let mut versions = index.versions.clone();
@@ -1788,8 +1792,8 @@ fn versions_cmd(args: &[String]) -> Result<()> {
             let active = Some(&v.id) == head_id.as_ref();
             if json {
                 json_out.push(serde_json::json!({
-                    "app_id": game.app_id,
-                    "game": game.name,
+                    "app_id": app_id,
+                    "game": name,
                     "id": v.id,
                     "created": v.created,
                     "machine": v.machine,
@@ -1824,6 +1828,133 @@ fn versions_cmd(args: &[String]) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&json_out)?);
     }
+    Ok(())
+}
+
+/// Games with saves in the cloud that aren't installed on this machine
+/// (backed up from another PC or Deck), with their newest version.
+/// Takes a few seconds (one request per game), so every run also saves the
+/// result and `--cached` prints that instantly (`[]` before the first run):
+/// the GUI and the Deck panel show it first, then refresh.
+fn cloud_games_cache() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|d| d.join("yasgm/cloud-games.json"))
+}
+
+/// App IDs from the last `cloud-games` run (no network).
+fn cached_cloud_app_ids() -> Vec<u64> {
+    let text = cloud_games_cache().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    serde_json::from_str::<Vec<serde_json::Value>>(&text)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|g| g["app_id"].as_u64())
+        .collect()
+}
+
+fn cloud_games_cmd(args: &[String]) -> Result<()> {
+    let cache = cloud_games_cache();
+    if flag(args, "--cached") {
+        let cached = cache.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
+        println!("{}", cached.as_deref().map(str::trim).unwrap_or("[]"));
+        return Ok(());
+    }
+    let account_flag = flag_value(args, "--account");
+    let store = match &account_flag {
+        Some(account) => build_store(account.clone(), &config::Config::load())?,
+        None => light_store()?.1,
+    };
+    let root = steam::find_steam_root().context("Steam installation not found")?;
+    let installed: std::collections::HashSet<u64> =
+        steam::installed_games(&steam::libraries(&root)?)?.iter().map(|g| g.app_id).collect();
+    let ids: Vec<u64> = store.cloud_app_ids()?.into_iter().filter(|id| !installed.contains(id)).collect();
+    // One request per game; a few at a time instead of one after another.
+    let indexes: Vec<store::Index> = std::thread::scope(|scope| {
+        let workers: Vec<_> = ids
+            .chunks(ids.len().div_ceil(8).max(1))
+            .map(|chunk| scope.spawn(|| chunk.iter().map(|&id| store.load_index(id)).collect::<Vec<_>>()))
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("index worker panicked")).collect::<Result<Vec<_>>>()
+    })?
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut out = Vec::new();
+    for index in indexes {
+        let app_id = index.app_id;
+        let latest = index.versions.iter().max_by_key(|v| v.created);
+        out.push(serde_json::json!({
+            "app_id": app_id,
+            "game": index.game,
+            "versions": index.versions.len(),
+            "latest_at": latest.map(|v| v.created),
+            "latest_machine": latest.map(|v| v.machine.clone()),
+            "latest_os": latest.map(|v| v.os.clone()),
+        }));
+    }
+    out.sort_by_key(|g| g["game"].as_str().unwrap_or_default().to_lowercase());
+    // Saves are kept per Steam account (D4); say so if another account has some.
+    for (account, games) in store.other_accounts().unwrap_or_default() {
+        eprintln!("note: Steam account {account} also has saves for {games} game(s) in the cloud (not shown)");
+    }
+    let json = serde_json::to_string(&out)?;
+    if let (Some(path), None) = (&cache, &account_flag) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = fsutil::write_atomic(path, json.as_bytes());
+    }
+    if flag(args, "--json") {
+        println!("{json}");
+    } else if out.is_empty() {
+        println!("no cloud saves for games that aren't installed here");
+    } else {
+        for g in &out {
+            println!(
+                "{} ({}) — {} version(s), newest from {} ({})",
+                g["game"].as_str().unwrap_or("?"),
+                g["app_id"],
+                g["versions"],
+                g["latest_machine"].as_str().unwrap_or("?"),
+                g["latest_os"].as_str().unwrap_or("?")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `move-account <from> [--to <account>] [--dry-run] [--keep-source]`:
+/// moves every game's cloud saves from one Steam account's folder into
+/// another (default: the one signed in here) — for saves a device uploaded
+/// under the wrong account. Copies are verified before anything is deleted;
+/// where both accounts have the game, the newer saves become active and the
+/// older stay pinned.
+fn move_account_cmd(args: &[String]) -> Result<()> {
+    let usage = "usage: yasgm move-account <from-account> [--to <account>] [--dry-run] [--keep-source]";
+    let from = positionals(args).first().cloned().context(usage)?;
+    let to = match flag_value(args, "--to") {
+        Some(to) => to,
+        None => light_store()?.0,
+    };
+    anyhow::ensure!(from != to, "both accounts are {to}");
+    let dry_run = flag(args, "--dry-run");
+    let cfg = config::Config::load();
+    let (source, dest) = (build_store(from.clone(), &cfg)?, build_store(to.clone(), &cfg)?);
+    let games = source.cloud_app_ids()?;
+    anyhow::ensure!(!games.is_empty(), "account {from} has no saves in the cloud");
+    println!("{} {} game(s) from account {from} to {to}…", if dry_run { "would move" } else { "moving" }, games.len());
+    let mut moved = 0;
+    for app_id in &games {
+        let copied = dest.import_game(&source, *app_id, dry_run)?;
+        let name = dest.load_index(*app_id)?.map(|i| i.game).or(source.load_index(*app_id)?.map(|i| i.game));
+        println!("  {} ({app_id}): {copied} version(s)", name.unwrap_or_default());
+        if !dry_run && !flag(args, "--keep-source") {
+            source.delete_game(*app_id)?;
+        }
+        moved += 1;
+    }
+    if !dry_run && !flag(args, "--keep-source") {
+        source.delete_account_folder();
+    }
+    println!("{} {moved} game(s)", if dry_run { "dry run: would move" } else { "moved" });
     Ok(())
 }
 
@@ -2014,7 +2145,10 @@ fn icons_cmd(args: &[String]) -> Result<()> {
     let pos = positionals(args);
     let app_ids: Vec<u64> = if pos.is_empty() {
         let root = root.as_ref().context("Steam installation not found")?;
-        steam::installed_games(&steam::libraries(root)?)?.iter().map(|g| g.app_id).collect()
+        let mut ids: Vec<u64> = steam::installed_games(&steam::libraries(root)?)?.iter().map(|g| g.app_id).collect();
+        // Plus games only in the cloud (shown as "not installed").
+        ids.extend(cached_cloud_app_ids().into_iter().filter(|id| !ids.contains(id)).collect::<Vec<_>>());
+        ids
     } else {
         pos.iter()
             .map(|p| p.parse().context("usage: yasgm icons [appid...] [--offline] [--json] [--embed]"))
@@ -2367,6 +2501,8 @@ fn main() -> Result<()> {
         Some("running") => running_cmd(),
         Some("backup") => backup_cmd(&args),
         Some("versions") => versions_cmd(&args),
+        Some("cloud-games") => cloud_games_cmd(&args),
+        Some("move-account") => move_account_cmd(&args),
         Some("restore") => restore_cmd(&args),
         Some("config") => config_cmd(&args),
         Some("icons") => icons_cmd(&args),

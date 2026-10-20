@@ -54,6 +54,14 @@ impl Provider for LocalFolderProvider {
             Err(err) => Err(err).with_context(|| format!("deleting {rel}")),
         }
     }
+
+    fn list(&self, rel: &str) -> Result<Vec<String>> {
+        match fs::read_dir(self.path(rel)) {
+            Ok(entries) => Ok(entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(err).with_context(|| format!("listing {rel}")),
+        }
+    }
 }
 
 #[cfg(test)]
