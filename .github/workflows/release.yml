@@ -1,0 +1,144 @@
+# Release pipeline (v1.0 step 7). Push a tag `v<version>` after
+# `scripts/version.sh <version>` → one GitHub Release with:
+#   - macOS app bundles (Apple Silicon + Intel: .dmg, updater .app.tar.gz + .sig)
+#   - the Windows installer (NSIS .exe + .sig)
+#   - latest.json — the desktop auto-update feed (D20), merged across builds
+#   - the Decky plugin zip + .sha256 (in-plugin self-update, D21)
+# The release stays a draft until every build has uploaded, so neither the
+# desktop updater (releases/latest) nor the plugin (skips drafts) can see a
+# half-filled one.
+#
+# Secrets (repo Settings → Secrets → Actions): TAURI_SIGNING_PRIVATE_KEY
+# (contents of ~/.tauri/yasgm-updater.key) and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD. macOS signing/notarization: step 9.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.draft.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Versions match the tag
+        run: scripts/version.sh --check "$TAG"
+      - id: draft
+        name: Draft release
+        run: |
+          find_id() { gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1; }
+          id="$(find_id)"
+          if [[ -z "$id" ]]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "YASGM $TAG" --generate-notes
+            id="$(find_id)"
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.target }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            args: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            args: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: "--bundles nsis"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ui/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+      # beforeBuildCommand builds the yasgm sidecar for the same target
+      # (TAURI_ENV_TARGET_TRIPLE).
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ui
+          releaseId: ${{ needs.release.outputs.id }}
+          args: --target ${{ matrix.target }} ${{ matrix.args }}
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+  decky:
+    name: Decky plugin
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: decky/package-lock.json
+      - name: Build the plugin zip
+        run: scripts/package-decky.sh
+      - name: Attach to the release
+        run: |
+          version="${TAG#v}"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/yasgm-decky-$version.zip" "dist/yasgm-decky-$version.zip.sha256"
+
+  publish:
+    name: Publish release
+    needs: [release, desktop, decky]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        run: gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/${{ needs.release.outputs.id }}" -F draft=false -f make_latest=true

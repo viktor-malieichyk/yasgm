@@ -361,11 +361,10 @@ GitHub itself. **Revised 2026-10-20 when implemented** (the original plan
 swapped plugin directories itself, which a non-root plugin can't do —
 `~/homebrew/plugins` belongs to root):
 
-- `.github/workflows/release-decky.yml`: pushing tag `v<version>` (must
-  equal `decky/package.json`'s version) builds `yasgm-decky-<ver>.zip` +
-  `.sha256` on ubuntu (rustup + zig + cargo-zigbuild, same
-  `scripts/package-decky.sh`) and attaches them to that tag's release
-  (created if missing; desktop bundles join it in step 7).
+- `.github/workflows/release.yml` (step 7): pushing tag `v<version>`
+  builds `yasgm-decky-<ver>.zip` + `.sha256` on ubuntu (rustup + zig +
+  cargo-zigbuild, same `scripts/package-decky.sh`) next to the desktop
+  bundles, in one release published only when all are uploaded.
 - Backend `check_update`: `api.github.com/repos/viktor-malieichyk/yasgm/
   releases` (not `/latest`, so desktop-only releases don't hide the plugin),
   skips drafts/prereleases, takes the zip named `yasgm-decky-<ver>.zip`,
@@ -1487,9 +1486,28 @@ and fast until the release is otherwise ready). Status is tracked inline.
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`
-   crate, `tauri.conf.json`, Decky `package.json`).
+   crate, `tauri.conf.json`, Decky `package.json`). **WRITTEN 2026-10-20,
+   not yet run.** `scripts/version.sh [<ver> | --check v<ver>]` sets/checks
+   the version in all five files (+ both Cargo.lock files; round-trip
+   tested). `.github/workflows/release.yml` (replaces the plugin-only
+   `release-decky.yml`): job `release` checks the tag against the files and
+   creates a **draft** release (reused on re-runs); `desktop` matrix —
+   macos-latest for aarch64- and x86_64-apple-darwin, windows-latest NSIS —
+   via `tauri-action` with `releaseId`, `includeUpdaterJson`,
+   `updaterJsonPreferNsis` (the sidecar builds for the same target through
+   `beforeBuildCommand`); `decky` — one zip with both arches (the earlier
+   "zips per arch" idea dropped: the plugin picks `bin/yasgm-<arch>`);
+   `publish` flips the draft to latest only after every build uploaded, so
+   neither updater sees a half-filled release. actionlint clean. Needs
+   repo secrets `TAURI_SIGNING_PRIVATE_KEY` + `_PASSWORD` (owner sets them;
+   the password never passes through the assistant). Two separate macOS
+   bundles instead of a universal one: the sidecar script builds one
+   target triple at a time.
 8. Docs: README install/update instructions per platform, PCGamingWiki
    attribution (D10), privacy note (data only in the user's own cloud).
+   **DONE 2026-10-20** (README rewritten: per-platform install incl.
+   Gatekeeper/SmartScreen workarounds, updates, privacy — no server, app
+   folder scope, other network calls — CLI reference, building, releasing).
 9. **macOS signing + notarization (D16)** — last: add Developer ID
    identity + notarization API key to the build, verify Gatekeeper accepts
    the downloaded `.dmg` and that a signed→signed auto-update works.
