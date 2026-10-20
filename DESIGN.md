@@ -578,9 +578,40 @@ Python `main.py`.
     launcher (Settings → Advanced) — it boots with `steamac.ssh=0` otherwise
     and runtime-masks sshd, so `systemctl enable` fails; `passwd` for the
     `steamos` user, then `ssh-copy-id -p 2222`.
+  - **Cross-OS restore Mac ↔ SteamOS (2026-10-20)** through the real
+    OneDrive (VM signed in via `auth --device`, same Steam account
+    57948699), using Baba Is You (native on both: Mac
+    `<home>/Library/Application Support/Baba_Is_You`, Linux
+    `<xdgData>/Baba_Is_You`). **Bug found**: restore re-expanded the
+    snapshot's recorded template ignoring its OS constraint, so a Mac
+    version restored on Linux was written to
+    `/home/steamos/Library/Application Support/Baba_Is_You` ("restored 4
+    files", game never sees them). Fix: `resolve::restore_target` — a
+    mount's own rule is used only if it applies natively on this OS (or is
+    OS-neutral, e.g. `<base>/save`); otherwise it's swapped for this OS's
+    rule with the same *location key* (template minus its OS-specific base
+    dir: `<home>/Library/Application Support/`, `<xdgData>/`,
+    `<winAppData>/`, …, compared case-insensitively). Ties: a candidate
+    whose data — or for Proton, whose `compatdata/<appid>/pfx` — already
+    exists wins, then native over Proton (a Windows version restored where
+    the game runs natively on Linux goes to the native dir, not an absent
+    prefix). No counterpart → the mount is skipped with a message, never
+    guessed. `extract` now takes the game's manifest rules; restore prints
+    `p0: <old> → <new> on this OS` when it remaps. Unit-tested (mac→linux,
+    windows→mac, windows→linux native vs. Proton-prefix, no-counterpart
+    skip, neutral rule). Verified live both ways with VM saves moved
+    aside: Mac version → VM wrote 4 files to `~/.local/share/Baba_Is_You`,
+    sha256 identical to the Mac's; a VM version (plus a marker file) → Mac
+    wrote 5 files to `~/Library/Application Support/Baba_Is_You`, all
+    matching, with the Mac's prior state kept as a pinned version. Test
+    versions and marker removed afterwards; both sides "in sync".
+    Known limit: the location key only bridges rules whose OS-specific
+    part is a leading base dir; games whose per-OS paths differ further
+    down (renamed folders, `<storeUserId>` only on one OS) still skip
+    rather than restore.
   Remaining in Phase 2 (needs SteamOS/Linux hardware to validate):
-  cross-OS restore (Mac/Windows ↔ SteamOS through a shared provider),
-  the headless `watch` daemon on Linux, cross-OS normalization. (Flatpak packaging moved to post-1.0 — SteamOS ships via
+  the headless `watch` daemon on Linux; cross-restore Windows ↔ SteamOS
+  via a Proton prefix (needs a Windows machine). (Flatpak packaging moved to post-1.0 — SteamOS ships via
   the Decky plugin, D21.)
 - **Phase 3 — Seamless daemon (~2–2.5 wks)**: DONE 2026-07-20 (Windows +
   macOS; Linux paths written but unvalidated per 2026-07-20 direction).

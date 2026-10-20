@@ -1190,7 +1190,8 @@ fn restore_cmd(args: &[String]) -> Result<()> {
     }
 
     let bytes = store.download_version(app_id, &version)?;
-    let written = snapshot::extract(&bytes, &version.mounts, ctx.os, game, dry_run)?;
+    let files = ctx.merged_game(app_id).map(|m| m.files).unwrap_or_default();
+    let written = snapshot::extract(&bytes, &version.mounts, &files, ctx.os, game, dry_run)?;
     if dry_run {
         println!("dry run: {written} files would be restored from {}", version.id);
         return Ok(());
@@ -1430,7 +1431,7 @@ fn selftest() -> Result<()> {
     let head = Store::head(&index).context("no head")?.clone();
     ensure!(head.id == second.id, "head is not the second version");
     let bytes = store.download_version(game.app_id, &head)?;
-    let written = snapshot::extract(&bytes, &head.mounts, os, &game, false)?;
+    let written = snapshot::extract(&bytes, &head.mounts, &files, os, &game, false)?;
     ensure!(written == 2, "expected 2 restored files, wrote {written}");
 
     println!("6/7 verify contents…");

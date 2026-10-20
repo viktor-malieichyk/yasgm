@@ -186,13 +186,15 @@ pub fn capture(
 /// template. Never deletes local files; only writes/overwrites the files the
 /// snapshot contains (callers snapshot current state first — D14).
 ///
-/// A mount can fail to resolve on this OS (e.g. a Linux-native mount from a
-/// snapshot captured on Linux, restored on Windows) — that's expected for
-/// cross-OS restores, not a fatal error, so such mounts are skipped rather
-/// than aborting the whole restore.
+/// Each mount goes where `resolve::restore_target` says, which maps a
+/// location captured on another OS to this OS's rule for it (`files` is the
+/// game's current manifest rules). A mount with no counterpart here (e.g. a
+/// Linux-only location restored on Windows) is expected for cross-OS
+/// restores, not a fatal error, so it's skipped rather than aborting.
 pub fn extract(
     zip_bytes: &[u8],
     mounts: &[Mount],
+    files: &HashMap<String, FileRule>,
     os: Os,
     game: &InstalledGame,
     dry_run: bool,
@@ -200,6 +202,7 @@ pub fn extract(
     let mut archive = ZipArchive::new(io::Cursor::new(zip_bytes))?;
     let mut written = 0u64;
     let mut skipped_mounts: HashSet<String> = HashSet::new();
+    let mut targets: HashMap<String, Option<String>> = HashMap::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         if entry.is_dir() {
@@ -217,9 +220,18 @@ pub fn extract(
             .find(|m| m.mount == mount_id)
             .with_context(|| format!("snapshot references unknown mount {mount_id}"))?;
 
-        let Some(resolved) = resolve::resolve_template(&mount.template, os, game) else {
+        let target = targets.entry(mount_id.to_owned()).or_insert_with(|| {
+            let found = resolve::restore_target(&mount.template, files, os, game);
+            if let Some((template, _)) = &found {
+                if *template != mount.template {
+                    eprintln!("  {mount_id}: {} → {template} on this OS", mount.template);
+                }
+            }
+            found.map(|(_, path)| path)
+        });
+        let Some(resolved) = target.clone() else {
             if skipped_mounts.insert(mount_id.to_owned()) {
-                eprintln!("  skipping {mount_id} — cannot resolve {} on this OS", mount.template);
+                eprintln!("  skipping {mount_id} — no save location on this OS matches {}", mount.template);
             }
             continue;
         };

@@ -1,6 +1,7 @@
 //! Resolve manifest path templates (placeholders like <winAppData>) into
 //! concrete paths for the current OS, including Proton prefixes on Linux.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{Constraint, FileRule};
@@ -206,6 +207,93 @@ pub fn resolve_template(template: &str, os: Os, game: &InstalledGame) -> Option<
     None
 }
 
+/// Base directories that differ per OS. What follows one is the
+/// OS-independent part of a save location, which is how a rule captured on
+/// one OS is matched to its counterpart on another, e.g. `baba_is_you` for
+/// both `<home>/Library/Application Support/Baba_Is_You` (mac) and
+/// `<xdgData>/Baba_Is_You` (linux). Longest prefixes first.
+const OS_BASE_DIRS: &[&str] = &[
+    "<home>/Library/Application Support/",
+    "<home>/Library/Preferences/",
+    "<home>/Library/Caches/",
+    "<home>/Library/Containers/",
+    "<home>/.local/share/",
+    "<home>/.config/",
+    "<home>/Documents/",
+    "<home>/Library/",
+    "<home>/",
+    "<xdgData>/",
+    "<xdgConfig>/",
+    "<winLocalAppDataLow>/",
+    "<winLocalAppData>/",
+    "<winAppData>/",
+    "<winDocuments>/",
+    "<winPublic>/",
+    "<winProgramData>/",
+    "<winDir>/",
+];
+
+/// OS-independent identity of a save location (see `OS_BASE_DIRS`); an
+/// OS-neutral template like `<base>/save` is its own key.
+fn location_key(template: &str) -> String {
+    let t = template.replace('\\', "/");
+    OS_BASE_DIRS
+        .iter()
+        .find_map(|base| t.strip_prefix(base))
+        .unwrap_or(&t)
+        .trim_matches('/')
+        .to_lowercase()
+}
+
+fn proton_prefix(game: &InstalledGame) -> PathBuf {
+    game.library.join("steamapps/compatdata").join(game.app_id.to_string()).join("pfx")
+}
+
+/// Where to restore a snapshot mount captured from `template` on this
+/// machine: `(template used, concrete path, possibly with `*`)`.
+///
+/// The mount's own rule is used as-is when it applies natively here (same
+/// OS, or OS-neutral like `<base>/save`). A rule from another OS is swapped
+/// for this OS's rule for the same location (same `location_key`) —
+/// otherwise a Mac `<home>/Library/Application Support/X` would be
+/// recreated verbatim under a Linux home. Among counterparts, one whose
+/// data (or Proton prefix) already exists wins, then native over Proton.
+/// `None` when this OS has no counterpart: skip, never guess a path.
+pub fn restore_target(
+    template: &str,
+    files: &HashMap<String, FileRule>,
+    os: Os,
+    game: &InstalledGame,
+) -> Option<(String, String)> {
+    match files.get(template) {
+        Some(rule) if applies_on(rule, os) => {
+            return substitute(template, &native_vars(os, game)).map(|path| (template.to_owned(), path));
+        }
+        // Rule no longer in the manifest: re-resolve as-is, but only when
+        // nothing OS-specific is involved.
+        None if location_key(template) == template.to_lowercase() => {
+            return resolve_template(template, os, game).map(|path| (template.to_owned(), path));
+        }
+        _ => {}
+    }
+    let key = location_key(template);
+    let mut candidates: Vec<(bool, bool, &String, String)> = files
+        .iter()
+        .filter(|(t, rule)| rule.is_save() && location_key(t) == key)
+        .filter_map(|(t, rule)| {
+            let res = resolve_rule(t, rule, os, game)?;
+            let path = res.path?;
+            let on_disk = match res.via {
+                Via::Native => !existing_matches(&path).is_empty(),
+                Via::Proton => proton_prefix(game).is_dir(),
+            };
+            Some((on_disk, res.via == Via::Native, t, path))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(b.2)));
+    candidates.into_iter().next().map(|(_, _, t, path)| (t.clone(), path))
+}
+
 /// Expand wildcards and check what actually exists on disk.
 pub fn existing_matches(path_pattern: &str) -> Vec<PathBuf> {
     if path_pattern.contains('*') {
@@ -283,6 +371,76 @@ mod tests {
             tags: vec!["save".to_owned()],
             when: vec![Constraint { os: Some("windows".to_owned()), store: None }],
         }
+    }
+
+    fn os_rule(os: &str) -> FileRule {
+        FileRule {
+            tags: vec!["save".to_owned()],
+            when: vec![Constraint { os: Some(os.to_owned()), store: None }],
+        }
+    }
+
+    /// Baba Is You's real rule shape: one save dir per OS.
+    fn per_os_rules() -> HashMap<String, FileRule> {
+        HashMap::from([
+            ("<home>/Library/Application Support/Baba_Is_You".to_owned(), os_rule("mac")),
+            ("<xdgData>/Baba_Is_You".to_owned(), os_rule("linux")),
+            ("<winAppData>/Baba_Is_You".to_owned(), os_rule("windows")),
+        ])
+    }
+
+    #[test]
+    fn restore_maps_mac_location_to_linux_counterpart() {
+        let game = fake_game(scratch_library("restore-mac-linux"), 736260);
+        let (template, path) =
+            restore_target("<home>/Library/Application Support/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+                .expect("linux has a counterpart");
+        assert_eq!(template, "<xdgData>/Baba_Is_You");
+        assert!(!path.contains("Library"), "mac path leaked onto linux: {path}");
+        assert!(path.ends_with("/Baba_Is_You"), "{path}");
+    }
+
+    #[test]
+    fn restore_maps_windows_location_to_mac_counterpart() {
+        let game = fake_game(scratch_library("restore-win-mac"), 736260);
+        let (template, _) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Mac, &game)
+            .expect("mac has a counterpart");
+        assert_eq!(template, "<home>/Library/Application Support/Baba_Is_You");
+    }
+
+    #[test]
+    fn restore_prefers_native_linux_over_proton_without_a_prefix() {
+        // A Windows-captured version restored on Linux where the game runs
+        // natively (no compatdata prefix): native location, not the prefix.
+        let game = fake_game(scratch_library("restore-win-linux"), 736260);
+        let (template, path) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+            .expect("linux has a counterpart");
+        assert_eq!(template, "<xdgData>/Baba_Is_You");
+        assert!(!path.contains("compatdata"), "{path}");
+    }
+
+    #[test]
+    fn restore_uses_proton_prefix_when_game_runs_under_proton() {
+        let library = scratch_library("restore-proton");
+        let game = fake_game(library.clone(), 736260);
+        std::fs::create_dir_all(proton_prefix(&game)).unwrap();
+        let (template, path) = restore_target("<winAppData>/Baba_Is_You", &per_os_rules(), Os::Linux, &game)
+            .expect("prefix exists");
+        assert_eq!(template, "<winAppData>/Baba_Is_You");
+        assert!(path.contains("compatdata/736260/pfx"), "{path}");
+        std::fs::remove_dir_all(&library).unwrap();
+    }
+
+    #[test]
+    fn restore_skips_location_without_counterpart_and_keeps_neutral_ones() {
+        let game = fake_game(scratch_library("restore-skip"), 1);
+        let files = HashMap::from([
+            ("<home>/Library/Application Support/MacOnly".to_owned(), os_rule("mac")),
+            ("<base>/save".to_owned(), FileRule { tags: vec!["save".to_owned()], when: Vec::new() }),
+        ]);
+        assert!(restore_target("<home>/Library/Application Support/MacOnly", &files, Os::Linux, &game).is_none());
+        let (template, _) = restore_target("<base>/save", &files, Os::Linux, &game).expect("neutral rule applies");
+        assert_eq!(template, "<base>/save");
     }
 
     #[test]
