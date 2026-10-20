@@ -286,25 +286,6 @@ button.primary:hover:not(:disabled) {
   overflow: hidden;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 2px 8px 14px;
-}
-
-.brand-logo {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-}
-
-.brand-name {
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.02em;
-}
-
 .view-nav {
   display: flex;
   flex-direction: column;
