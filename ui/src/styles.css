@@ -552,6 +552,82 @@ img.game-icon {
   font-size: 12px;
 }
 
+/* ---- loading states ---- */
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.version-row.skeleton {
+  min-height: 52px;
+}
+
+.skeleton-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.skeleton-lines span {
+  display: block;
+  height: 11px;
+  border-radius: 4px;
+  background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--fg) 8%, transparent) 50%,
+      transparent 100%
+    )
+    0 0 / 200% 100%,
+    color-mix(in srgb, var(--fg) 8%, transparent);
+  animation: shimmer 1.2s ease-in-out infinite;
+}
+
+.skeleton-lines span:first-child {
+  width: 42%;
+}
+
+.skeleton-lines span:last-child {
+  width: 64%;
+  opacity: 0.7;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0, 0 0;
+  }
+  to {
+    background-position: -100% 0, 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+  .skeleton-lines span {
+    animation: none;
+  }
+}
+
 .badge {
   display: inline-block;
   border-radius: 999px;

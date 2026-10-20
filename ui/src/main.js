@@ -19,6 +19,7 @@ let openProviderBtnEl;
 let openBackupsBtnEl;
 let openLocationMsgEl;
 let versionsListEl;
+let versionsSpinnerEl;
 let statusMsgEl;
 let themeSwitchEl;
 let navLibraryEl;
@@ -222,7 +223,7 @@ function selectGame(appId) {
   renderGamesList();
   renderDetailSettings();
   openLocationMsgEl.textContent = "";
-  loadVersions();
+  loadVersions(true);
 }
 
 function showEmptyDetail() {
@@ -341,23 +342,52 @@ async function openBackupsLocation() {
 
 // ---- versions for the selected game ------------------------------------
 
-async function loadVersions() {
+// Bumped per call so a slow reply for a previously selected game can't
+// overwrite the list of the one now selected.
+let versionsRequest = 0;
+
+// Switching games (`fresh`) swaps the list for skeleton rows; refreshes
+// after restore/pin/delete keep the current rows and only show the spinner.
+async function loadVersions(fresh = false) {
   if (selectedAppId === null) return;
-  versionsListEl.innerHTML = "";
-  openBackupsBtnEl.classList.add("hidden");
+  const request = ++versionsRequest;
+  versionsSpinnerEl.classList.remove("hidden");
+  if (fresh) {
+    openBackupsBtnEl.classList.add("hidden");
+    versionsListEl.innerHTML = "";
+    versionsListEl.setAttribute("aria-busy", "true");
+    for (let i = 0; i < 3; i++) {
+      const row = document.createElement("div");
+      row.className = "version-row skeleton";
+      row.innerHTML = '<div class="skeleton-lines"><span></span><span></span></div>';
+      versionsListEl.appendChild(row);
+    }
+  }
   try {
     const versions = await invoke("list_versions", { appId: selectedAppId });
+    if (request !== versionsRequest) return;
+    versionsListEl.innerHTML = "";
     if (versions.length === 0) {
       versionsListEl.innerHTML = '<p class="muted">no versions yet</p>';
-      return;
-    }
-    versions.sort((a, b) => b.created - a.created);
-    for (const v of versions) {
-      versionsListEl.appendChild(renderVersionRow(v));
+    } else {
+      versions.sort((a, b) => b.created - a.created);
+      for (const v of versions) {
+        versionsListEl.appendChild(renderVersionRow(v));
+      }
     }
     openBackupsBtnEl.classList.toggle("hidden", !versions.some((v) => v.pending));
   } catch (err) {
-    setStatus(`error loading versions: ${err}`);
+    if (request !== versionsRequest) return;
+    versionsListEl.innerHTML = "";
+    const msg = document.createElement("p");
+    msg.className = "muted";
+    msg.textContent = `couldn't load versions: ${err}`;
+    versionsListEl.appendChild(msg);
+  } finally {
+    if (request === versionsRequest) {
+      versionsSpinnerEl.classList.add("hidden");
+      versionsListEl.removeAttribute("aria-busy");
+    }
   }
 }
 
@@ -613,6 +643,7 @@ window.addEventListener("DOMContentLoaded", () => {
   openBackupsBtnEl = document.querySelector("#open-backups-btn");
   openLocationMsgEl = document.querySelector("#open-location-msg");
   versionsListEl = document.querySelector("#versions-list");
+  versionsSpinnerEl = document.querySelector("#versions-spinner");
   statusMsgEl = document.querySelector("#status-msg");
   themeSwitchEl = document.querySelector("#theme-switch");
   navLibraryEl = document.querySelector("#nav-library");
