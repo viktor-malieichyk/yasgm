@@ -51,12 +51,19 @@ pub fn tray_main(settle: Duration) -> Result<()> {
 
     let menu = Menu::new();
     let status_item = MenuItem::new("starting…", false, None);
+    let open_item = MenuItem::new("Open YASGM", true, None);
     let sync_item = MenuItem::new("Sync now", true, None);
     let pause_item = MenuItem::new("Pause", true, None);
     let quit_item = MenuItem::new("Quit YASGM", true, None);
     menu.append_items(&[
         &status_item,
         &PredefinedMenuItem::separator(),
+    ])?;
+    // Only when the desktop app is installed alongside (not for a bare CLI).
+    if crate::gui::available() {
+        menu.append(&open_item)?;
+    }
+    menu.append_items(&[
         &sync_item,
         &pause_item,
         &quit_item,
@@ -93,7 +100,11 @@ pub fn tray_main(settle: Duration) -> Result<()> {
         }
 
         while let Ok(menu_event) = menu_events.try_recv() {
-            if menu_event.id == *sync_item.id() {
+            if menu_event.id == *open_item.id() {
+                if let Err(err) = crate::gui::open() {
+                    eprintln!("could not open the YASGM window: {err:#}");
+                }
+            } else if menu_event.id == *sync_item.id() {
                 let _ = control_tx.send(WatchCommand::Sync(None));
             } else if menu_event.id == *pause_item.id() {
                 paused = !paused;

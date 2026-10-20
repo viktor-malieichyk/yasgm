@@ -1423,6 +1423,18 @@ and fast until the release is otherwise ready). Status is tracked inline.
    "Use OneDrive instead" and "Sign in again" removed (disconnect → sign in
    switches account). Verified: CLI cycle, daemon idle while disconnected and
    QR events on the VM, GUI states via headless Chrome with a stubbed backend.
+   **Tray "Open YASGM" + sidebar cleanup (2026-10-20).** The daemon's
+   tray menu (Windows/macOS) got **Open YASGM** (shown only when the app
+   sits next to the CLI): `src/gui.rs` finds the sibling `ui`/`ui.exe`
+   (`YASGM(.exe)`) and launches it — the app is single-instance, so a
+   running one just shows its window; inside a `.app` it runs `open` on the
+   bundle (Reopen handler). Also `yasgm gui`. Verified `yasgm gui` against
+   the running dev app (exits 0, still one `ui` process); the menu click
+   itself isn't scriptable here. Dev gotcha fixed: `tauri dev` only copies
+   the sidecar into `target/debug` when the Tauri crate is rebuilt, so a
+   CLI-only change kept running the old daemon — `build-sidecar.sh` now
+   refreshes that copy. GUI: the **Library** nav button is gone (picking a
+   game already returns to the library); **Settings** toggles.
 7. **Release pipeline** (GitHub Actions): tag → macOS + Windows bundles via
    `tauri-action` with updater signatures + `latest.json`, Decky zips per
    arch; GitHub Release. Version single-sourced (root `Cargo.toml`, `ui`

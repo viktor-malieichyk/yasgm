@@ -23,7 +23,6 @@ let versionsListEl;
 let versionsSpinnerEl;
 let statusMsgEl;
 let themeSwitchEl;
-let navLibraryEl;
 let navSettingsEl;
 let libraryViewEl;
 let settingsViewEl;
@@ -51,7 +50,6 @@ function showView(view) {
   const isLibrary = view === "library";
   libraryViewEl.classList.toggle("hidden", !isLibrary);
   settingsViewEl.classList.toggle("hidden", isLibrary);
-  navLibraryEl.classList.toggle("selected", isLibrary);
   navSettingsEl.classList.toggle("selected", !isLibrary);
   if (!isLibrary) {
     loadProvider();
@@ -729,7 +727,6 @@ window.addEventListener("DOMContentLoaded", () => {
   versionsSpinnerEl = document.querySelector("#versions-spinner");
   statusMsgEl = document.querySelector("#status-msg");
   themeSwitchEl = document.querySelector("#theme-switch");
-  navLibraryEl = document.querySelector("#nav-library");
   navSettingsEl = document.querySelector("#nav-settings");
   libraryViewEl = document.querySelector("#library-view");
   settingsViewEl = document.querySelector("#settings-view");
@@ -772,8 +769,11 @@ window.addEventListener("DOMContentLoaded", () => {
   openProviderBtnEl.addEventListener("click", openProviderLocation);
   openBackupsBtnEl.addEventListener("click", openBackupsLocation);
 
-  navLibraryEl.addEventListener("click", () => showView("library"));
-  navSettingsEl.addEventListener("click", () => showView("settings"));
+  // Settings is a toggle; picking a game (or clicking Settings again) goes
+  // back to the library, so there's no separate Library button.
+  navSettingsEl.addEventListener("click", () =>
+    showView(settingsViewEl.classList.contains("hidden") ? "settings" : "library"),
+  );
 
   for (const seg of themeSwitchEl.querySelectorAll(".segment")) {
     seg.addEventListener("click", () => {

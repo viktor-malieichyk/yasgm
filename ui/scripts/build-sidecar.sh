@@ -38,3 +38,11 @@ dest="$dest_dir/yasgm-$triple"
 cp "$built" "$dest"
 chmod +x "$dest"
 echo "sidecar ready: $dest"
+
+# `tauri dev` copies the sidecar next to the dev binary only when the Tauri
+# crate itself is rebuilt, so a CLI-only change would keep running the old
+# copy. Refresh it here (host target only).
+dev_copy="$repo_root/ui/src-tauri/target/debug/$exe_name"
+if [[ "$triple" == "$host" && -f "$dev_copy" ]]; then
+  cp "$built" "$dev_copy"
+fi

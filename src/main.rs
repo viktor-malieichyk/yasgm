@@ -6,6 +6,7 @@ mod autostart;
 mod config;
 mod control;
 mod fsutil;
+mod gui;
 mod icons;
 mod local;
 mod lock;
@@ -2311,6 +2312,7 @@ fn main() -> Result<()> {
         Some("restore") => restore_cmd(&args),
         Some("config") => config_cmd(&args),
         Some("icons") => icons_cmd(&args),
+        Some("gui") => gui::open(),
         Some("manifest-gaps") => manifest_gaps_cmd(&args),
         Some("pin") => pin_cmd(&args, true),
         Some("unpin") => pin_cmd(&args, false),
@@ -2328,7 +2330,7 @@ fn main() -> Result<()> {
                  backup [appid] [--dry-run]\n  \
                  versions [appid] [--json]\n  restore <appid> [--version <id>] [--dry-run]\n  \
                  config [--json | <appid> --mode auto|sync|backup|off --keep N|default | --clear]\n  \
-                 icons [appid...] [--offline] [--json] [--embed]\n  \
+                 icons [appid...] [--offline] [--json] [--embed]\n  gui\n  \
                  pin <appid> <version-id>\n  unpin <appid> <version-id>\n  \
                  rm <appid> <version-id>"
             );
