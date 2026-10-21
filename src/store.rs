@@ -58,12 +58,30 @@ pub struct Version {
     #[serde(default)]
     pub pinned: bool,
     pub mounts: Vec<Mount>,
+    /// When the saves were last written: the newest file modification time
+    /// in the snapshot (unix seconds). Decides which side of a conflict
+    /// becomes active (D5). Missing on versions made before 2026-10-22.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<u64>,
     /// Set only in-memory by `Store::load_index`'s merge step — never read
     /// from or written to either provider's own index.json. True means this
     /// version currently lives in the local offline-pending store rather
     /// than the primary provider.
     #[serde(default, skip_serializing)]
     pub pending: bool,
+}
+
+/// The content of a version to store (everything but its id and date).
+pub struct NewVersion<'a> {
+    pub game: &'a str,
+    pub app_id: u64,
+    pub bytes: &'a [u8],
+    pub content_hash: &'a str,
+    pub files: u64,
+    pub mounts: Vec<Mount>,
+    pub os: &'a str,
+    pub saved_at: Option<u64>,
+    pub pinned: bool,
 }
 
 pub struct Store {
@@ -126,7 +144,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn with_providers(primary: Box<dyn Provider>, pending: Box<dyn Provider>, account: String) -> Store {
+    pub(crate) fn with_providers(primary: Box<dyn Provider>, pending: Box<dyn Provider>, account: String) -> Store {
         Store { primary, pending, account }
     }
 
@@ -229,15 +247,18 @@ impl Store {
     ) -> Result<Version> {
         let bytes = fs::read(&snapshot.zip_path).context("reading staged zip")?;
         let version = self.push_raw(
-            game_name,
-            app_id,
-            &bytes,
-            &snapshot.content_hash,
-            snapshot.file_count,
-            snapshot.mounts.clone(),
-            os,
+            &NewVersion {
+                game: game_name,
+                app_id,
+                bytes: &bytes,
+                content_hash: &snapshot.content_hash,
+                files: snapshot.file_count,
+                mounts: snapshot.mounts.clone(),
+                os,
+                saved_at: snapshot.saved_at,
+                pinned,
+            },
             keep,
-            pinned,
         )?;
         let _ = fs::remove_file(&snapshot.zip_path);
         Ok(version)
@@ -247,140 +268,148 @@ impl Store {
     /// "make this content the active head again" step). Tries the primary
     /// provider first; on any failure, falls back to the local pending
     /// store so the save is still versioned somewhere.
-    #[allow(clippy::too_many_arguments)]
-    pub fn push_raw(
-        &self,
-        game_name: &str,
-        app_id: u64,
-        zip_bytes: &[u8],
-        content_hash: &str,
-        file_count: u64,
-        mounts: Vec<Mount>,
-        os: &str,
-        keep: usize,
-        pinned: bool,
-    ) -> Result<Version> {
+    pub fn push_raw(&self, new: &NewVersion, keep: usize) -> Result<Version> {
         // Best-effort catch-up: if we can reach the primary now, clear out
         // anything stranded from a previous offline run before adding to
         // it. Failure here just means we're still offline — proceed either
         // way, since the fallback path below covers that.
-        let _ = self.flush_pending(app_id, keep);
+        let _ = self.flush_pending(new.app_id, keep);
 
-        match self.push_raw_to(&*self.primary, game_name, app_id, zip_bytes, content_hash, file_count, mounts.clone(), os, keep, pinned)
-        {
+        match self.push_raw_to(&*self.primary, new, keep, None) {
             Ok(version) => Ok(version),
             Err(primary_err) => {
                 let mut version = self
-                    .push_raw_to(&*self.pending, game_name, app_id, zip_bytes, content_hash, file_count, mounts, os, keep, pinned)
+                    .push_raw_to(&*self.pending, new, keep, None)
                     .with_context(|| format!("also failed writing local pending backup after primary failed: {primary_err:#}"))?;
                 version.pending = true;
                 eprintln!(
-                    "{game_name}: couldn't reach the cloud ({primary_err:#}) — saved a local \
-                     pending backup instead; it'll sync automatically next time this game backs up"
+                    "{}: couldn't reach the cloud ({primary_err:#}) — saved a local \
+                     pending backup instead; it'll sync automatically next time this game backs up",
+                    new.game
                 );
                 Ok(version)
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn push_raw_to(
-        &self,
-        provider: &dyn Provider,
-        game_name: &str,
-        app_id: u64,
-        zip_bytes: &[u8],
-        content_hash: &str,
-        file_count: u64,
-        mounts: Vec<Mount>,
-        os: &str,
-        keep: usize,
-        pinned: bool,
-    ) -> Result<Version> {
-        let created = unix_now();
-        let mut id = format!("{}_{}", timestamp_id(created), machine_name());
-
+    /// Stores `new` on `provider`. `existing` keeps a version's identity (id,
+    /// date, machine) when it moves from the pending store to the primary,
+    /// so a backup made offline keeps its place in time instead of looking
+    /// like the newest version.
+    fn push_raw_to(&self, provider: &dyn Provider, new: &NewVersion, keep: usize, existing: Option<&Version>) -> Result<Version> {
+        let app_id = new.app_id;
         let mut index = self.load_index_from(provider, app_id)?.unwrap_or(Index {
             schema: 1,
-            game: game_name.to_owned(),
+            game: new.game.to_owned(),
             app_id,
             versions: Vec::new(),
         });
-        while index.versions.iter().any(|v| v.id == id) {
-            id.push('x'); // same machine, same second — keep ids unique
-        }
-        let version = Version {
-            id: id.clone(),
-            created,
-            machine: machine_name(),
-            os: os.to_owned(),
-            content_hash: content_hash.to_owned(),
-            size: zip_bytes.len() as u64,
-            files: file_count,
-            pinned,
-            mounts,
-            pending: false,
+        let version = match existing {
+            Some(v) => {
+                // Already there: an earlier flush stored it but stopped
+                // before clearing it from the pending store.
+                if index.versions.iter().any(|o| o.id == v.id && o.content_hash == v.content_hash) {
+                    return Ok(Version { pending: false, ..v.clone() });
+                }
+                let mut id = v.id.clone();
+                while index.versions.iter().any(|o| o.id == id) {
+                    id.push('x'); // another version got this id meanwhile
+                }
+                Version { id, pending: false, ..v.clone() }
+            }
+            None => {
+                let created = unix_now();
+                let mut id = format!("{}_{}", timestamp_id(created), machine_name());
+                while index.versions.iter().any(|v| v.id == id) {
+                    id.push('x'); // same machine, same second — keep ids unique
+                }
+                Version {
+                    id,
+                    created,
+                    machine: machine_name(),
+                    os: new.os.to_owned(),
+                    content_hash: new.content_hash.to_owned(),
+                    size: new.bytes.len() as u64,
+                    files: new.files,
+                    pinned: new.pinned,
+                    mounts: new.mounts.clone(),
+                    saved_at: new.saved_at,
+                    pending: false,
+                }
+            }
         };
-
-        let zip_rel = format!("{}/versions/{id}.zip", self.game_base(app_id));
-        provider.upload(&zip_rel, zip_bytes)?;
+        let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
+        provider.upload(&zip_rel, new.bytes)?;
         index.versions.push(version.clone());
-        self.apply_retention_to(provider, &mut index, keep)?;
+        // Index first, then the pruned zips: a failure in between leaves
+        // unreferenced zips, never index entries without their zip.
+        let doomed = Self::apply_retention(&mut index, keep);
         self.save_index_to(provider, &index)?;
+        for id in &doomed {
+            let _ = provider.delete(&format!("{}/versions/{id}.zip", self.game_base(app_id)));
+        }
 
         let total: u64 = index.versions.iter().map(|v| v.size).sum();
         if total > SIZE_WARN_BYTES {
             eprintln!(
-                "warning: {game_name} now stores {:.1} GB (D9 threshold is 1 GB); \
+                "warning: {} now stores {:.1} GB (D9 threshold is 1 GB); \
                  consider lowering its version count (`yasgm config {app_id} --keep N`)",
+                new.game,
                 total as f64 / 1_073_741_824.0
             );
         }
         Ok(version)
     }
 
-    /// Move any versions sitting in the local pending store into the
-    /// primary provider now that it's (hopefully) reachable again. Returns
-    /// how many were flushed (0 if there was nothing pending). Public and
-    /// meant to be called explicitly at the start of `sync`/`backup` — not
-    /// just relied on via `push_raw`'s own internal call — because a game
-    /// whose save content hasn't changed since a prior offline backup never
-    /// reaches `push_raw` at all (callers short-circuit on "unchanged"), so
-    /// without an explicit call a pending version could sit stranded
-    /// indefinitely even after connectivity returns. Leaves no
-    /// partially-flushed state: a version is only deleted from pending
-    /// after it's confirmed present on primary.
-    pub fn flush_pending(&self, app_id: u64, keep: usize) -> Result<usize> {
-        let Some(pending_index) = self.load_index_from(&*self.pending, app_id)? else {
-            return Ok(0);
+    /// Moves versions from the local pending store into the primary
+    /// provider now that it's (hopefully) reachable again, keeping each
+    /// one's id and date. Returns the ids moved. Called at the start of
+    /// every sync/backup, not only from `push_raw`: a game whose saves
+    /// haven't changed since an offline backup never reaches `push_raw`.
+    /// Progress is recorded after each version, so stopping part-way (the
+    /// network drops again) leaves both stores consistent.
+    pub fn flush_pending(&self, app_id: u64, keep: usize) -> Result<Vec<String>> {
+        let Some(mut pending_index) = self.load_index_from(&*self.pending, app_id)? else {
+            return Ok(Vec::new());
         };
-        if pending_index.versions.is_empty() {
-            return Ok(0);
-        }
-        for version in &pending_index.versions {
+        let index_rel = format!("{}/index.json", self.game_base(app_id));
+        let mut flushed = Vec::new();
+        while let Some(version) = pending_index.versions.first().cloned() {
             let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
             let bytes = self.pending.download(&zip_rel)?;
-            self.push_raw_to(
-                &*self.primary,
-                &pending_index.game,
+            let new = NewVersion {
+                game: &pending_index.game,
                 app_id,
-                &bytes,
-                &version.content_hash,
-                version.files,
-                version.mounts.clone(),
-                &version.os,
-                keep,
-                version.pinned,
-            )?;
+                bytes: &bytes,
+                content_hash: &version.content_hash,
+                files: version.files,
+                mounts: version.mounts.clone(),
+                os: &version.os,
+                saved_at: version.saved_at,
+                pinned: version.pinned,
+            };
+            self.push_raw_to(&*self.primary, &new, keep, Some(&version))?;
+            // Record progress after every version, so a failure part-way
+            // never leaves the pending index naming a zip that's gone.
+            pending_index.versions.remove(0);
+            if pending_index.versions.is_empty() {
+                self.pending.delete(&index_rel)?;
+            } else {
+                self.save_index_to(&*self.pending, &pending_index)?;
+            }
             self.pending.delete(&zip_rel)?;
+            flushed.push(version.id);
         }
-        let index_rel = format!("{}/index.json", self.game_base(app_id));
-        self.pending.delete(&index_rel)?;
-        Ok(pending_index.versions.len())
+        if flushed.is_empty() {
+            self.pending.delete(&index_rel)?;
+        }
+        Ok(flushed)
     }
 
     /// Keep the newest `keep` non-pinned versions; pinned ones always stay.
-    fn apply_retention_to(&self, provider: &dyn Provider, index: &mut Index, keep: usize) -> Result<()> {
+    /// Removes the rest from `index` and returns their ids (the caller
+    /// deletes their zips after saving the index).
+    fn apply_retention(index: &mut Index, keep: usize) -> Vec<String> {
         let mut unpinned: Vec<(u64, String)> = index
             .versions
             .iter()
@@ -388,16 +417,12 @@ impl Store {
             .map(|v| (v.created, v.id.clone()))
             .collect();
         if unpinned.len() <= keep {
-            return Ok(());
+            return Vec::new();
         }
         unpinned.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
         let doomed: Vec<String> = unpinned.split_off(keep).into_iter().map(|(_, id)| id).collect();
-        for id in &doomed {
-            let zip_rel = format!("{}/versions/{id}.zip", self.game_base(index.app_id));
-            provider.delete(&zip_rel)?;
-        }
         index.versions.retain(|v| !doomed.contains(&v.id));
-        Ok(())
+        doomed
     }
 
     /// Finds which provider (primary or pending) currently holds a version.
@@ -549,8 +574,8 @@ mod tests {
         dir
     }
 
-    fn mounts() -> Vec<Mount> {
-        Vec::new()
+    fn test_version<'a>(game: &'a str, app_id: u64, bytes: &'a [u8], hash: &'a str, os: &'a str) -> NewVersion<'a> {
+        NewVersion { game, app_id, bytes, content_hash: hash, files: 1, mounts: Vec::new(), os, saved_at: None, pinned: false }
     }
 
     #[test]
@@ -563,7 +588,7 @@ mod tests {
         );
 
         let version = store
-            .push_raw("Game", 42, b"zip-bytes", "hash1", 1, mounts(), "mac", 10, false)
+            .push_raw(&test_version("Game", 42, b"zip-bytes", "hash1", "mac"), 10)
             .expect("falls back to pending instead of erroring");
         assert!(version.pending, "version pushed via fallback should be marked pending");
 
@@ -588,14 +613,14 @@ mod tests {
             "acct".to_owned(),
         );
         assert!(online.cloud_app_ids().unwrap().is_empty(), "no games folder yet");
-        online.push_raw("Game", 42, b"zip", "h1", 1, mounts(), "mac", 10, false).unwrap();
+        online.push_raw(&test_version("Game", 42, b"zip", "h1", "mac"), 10).unwrap();
         // Another game captured while offline lands in the pending store.
         let offline = Store::with_providers(
             Box::new(AlwaysFailProvider),
             Box::new(LocalFolderProvider::new(pending_root.clone())),
             "acct".to_owned(),
         );
-        offline.push_raw("Other", 7, b"zip", "h2", 1, mounts(), "mac", 10, false).unwrap();
+        offline.push_raw(&test_version("Other", 7, b"zip", "h2", "mac"), 10).unwrap();
         assert_eq!(online.cloud_app_ids().unwrap(), vec![7, 42]);
         fs::remove_dir_all(&primary_root).ok();
         fs::remove_dir_all(&pending_root).ok();
@@ -613,10 +638,10 @@ mod tests {
             )
         };
         let (wrong, right) = (store("wrong"), store("right"));
-        wrong.push_raw("Moved", 1, b"deck-only", "h1", 1, mounts(), "linux", 10, false).unwrap();
-        right.push_raw("Both", 2, b"mac", "h2", 1, mounts(), "macos", 10, false).unwrap();
+        wrong.push_raw(&test_version("Moved", 1, b"deck-only", "h1", "linux"), 10).unwrap();
+        right.push_raw(&test_version("Both", 2, b"mac", "h2", "macos"), 10).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100)); // version ids are per second
-        wrong.push_raw("Both", 2, b"deck-newer", "h3", 1, mounts(), "linux", 10, false).unwrap();
+        wrong.push_raw(&test_version("Both", 2, b"deck-newer", "h3", "linux"), 10).unwrap();
 
         assert_eq!(right.import_game(&wrong, 1, true).unwrap(), 1, "dry run counts");
         assert!(right.load_index(1).unwrap().is_none(), "dry run writes nothing");
@@ -654,7 +679,7 @@ mod tests {
                 "acct".to_owned(),
             );
             seed_store
-                .push_raw("Game", 7, b"offline-bytes", "hash-offline", 1, mounts(), "mac", 10, false)
+                .push_raw(&test_version("Game", 7, b"offline-bytes", "hash-offline", "mac"), 10)
                 .unwrap();
         }
 
@@ -666,7 +691,7 @@ mod tests {
         // A normal push against a now-reachable primary should flush the
         // stranded pending version first.
         let new_version = store
-            .push_raw("Game", 7, b"online-bytes", "hash-online", 1, mounts(), "mac", 10, false)
+            .push_raw(&test_version("Game", 7, b"online-bytes", "hash-online", "mac"), 10)
             .unwrap();
         assert!(!new_version.pending);
 
@@ -680,6 +705,72 @@ mod tests {
         fs::remove_dir_all(&pending_root).ok();
     }
 
+    /// The local folder provider, but uploads fail once `budget` runs out.
+    struct Flaky {
+        inner: LocalFolderProvider,
+        budget: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl Provider for Flaky {
+        fn exists(&self, rel: &str) -> Result<bool> {
+            self.inner.exists(rel)
+        }
+        fn download(&self, rel: &str) -> Result<Vec<u8>> {
+            self.inner.download(rel)
+        }
+        fn upload(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+            if self.budget.try_update(Ordering::SeqCst, Ordering::SeqCst, |b| b.checked_sub(1)).is_err() {
+                anyhow::bail!("connection dropped");
+            }
+            self.inner.upload(rel, bytes)
+        }
+        fn delete(&self, rel: &str) -> Result<()> {
+            self.inner.delete(rel)
+        }
+        fn list(&self, rel: &str) -> Result<Vec<String>> {
+            self.inner.list(rel)
+        }
+    }
+
+    #[test]
+    fn flush_interrupted_part_way_resumes_and_keeps_dates() {
+        let primary_root = scratch_dir("flaky-primary");
+        let pending_root = scratch_dir("flaky-pending");
+        let offline = Store::with_providers(
+            Box::new(AlwaysFailProvider),
+            Box::new(LocalFolderProvider::new(pending_root.clone())),
+            "acct".to_owned(),
+        );
+        let first = offline.push_raw(&test_version("Game", 3, b"one", "h1", "mac"), 10).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = offline.push_raw(&test_version("Game", 3, b"two", "h2", "mac"), 10).unwrap();
+
+        // Enough for the first version (zip + index), not the second.
+        let budget = std::sync::Arc::new(AtomicUsize::new(2));
+        let flaky = Store::with_providers(
+            Box::new(Flaky { inner: LocalFolderProvider::new(primary_root.clone()), budget: budget.clone() }),
+            Box::new(LocalFolderProvider::new(pending_root.clone())),
+            "acct".to_owned(),
+        );
+        assert!(flaky.flush_pending(3, 10).is_err());
+        let index = flaky.load_index(3).unwrap().unwrap();
+        assert_eq!(index.versions.len(), 2, "one moved, one still pending — none lost");
+        assert_eq!(index.versions.iter().filter(|v| v.pending).count(), 1);
+        assert!(flaky.download_version(3, index.versions.iter().find(|v| v.pending).unwrap()).is_ok());
+
+        budget.store(100, Ordering::SeqCst);
+        assert_eq!(flaky.flush_pending(3, 10).unwrap(), vec![second.id.clone()]);
+        let index = flaky.load_index(3).unwrap().unwrap();
+        assert!(index.versions.iter().all(|v| !v.pending));
+        for original in [&first, &second] {
+            let moved = index.versions.iter().find(|v| v.id == original.id).expect("same id");
+            assert_eq!(moved.created, original.created, "keeps its original date");
+        }
+        assert!(flaky.flush_pending(3, 10).unwrap().is_empty());
+        fs::remove_dir_all(&primary_root).ok();
+        fs::remove_dir_all(&pending_root).ok();
+    }
+
     #[test]
     fn set_pinned_and_remove_version_operate_on_whichever_store_holds_it() {
         let pending_root = scratch_dir("pinrm-pending");
@@ -689,7 +780,7 @@ mod tests {
             "acct".to_owned(),
         );
         let version = store
-            .push_raw("Game", 1, b"data", "hash", 1, mounts(), "mac", 10, false)
+            .push_raw(&test_version("Game", 1, b"data", "hash", "mac"), 10)
             .unwrap();
 
         store.set_pinned(1, &version.id, true).unwrap();

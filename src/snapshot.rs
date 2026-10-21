@@ -38,6 +38,9 @@ pub struct Snapshot {
     pub file_count: u64,
     pub size: u64,
     pub mounts: Vec<Mount>,
+    /// Newest file modification time (unix seconds): when the saves were
+    /// last written. See `Version::saved_at`.
+    pub saved_at: Option<u64>,
 }
 
 pub fn staging_dir() -> Result<PathBuf> {
@@ -46,6 +49,32 @@ pub fn staging_dir() -> Result<PathBuf> {
         .join("yasgm/staging");
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// A fresh staging file per capture: two processes (a preview run beside a
+/// real sync) capturing the same game must not share or delete each
+/// other's zip.
+fn staging_path(app_id: u64) -> Result<PathBuf> {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(staging_dir()?.join(format!("{app_id}-{}-{n}.zip", std::process::id())))
+}
+
+fn unix_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Zip timestamps have no time zone; we always store UTC.
+fn zip_time(secs: u64) -> Option<zip::DateTime> {
+    let t = time::OffsetDateTime::from_unix_timestamp(secs as i64).ok()?;
+    zip::DateTime::from_date_and_time(t.year() as u16, t.month() as u8, t.day(), t.hour(), t.minute(), t.second()).ok()
+}
+
+fn zip_time_secs(dt: zip::DateTime) -> Option<u64> {
+    let month = time::Month::try_from(dt.month()).ok()?;
+    let date = time::Date::from_calendar_date(dt.year() as i32, month, dt.day()).ok()?;
+    let time = time::Time::from_hms(dt.hour(), dt.minute(), dt.second()).ok()?;
+    u64::try_from(time::PrimitiveDateTime::new(date, time).assume_utc().unix_timestamp()).ok()
 }
 
 fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
@@ -163,21 +192,31 @@ pub fn capture(
     // Deterministic content hash over names + bytes, so identical states are
     // recognized regardless of file mtimes.
     let mut hasher = Sha256::new();
-    let zip_path = staging_dir()?.join(format!("{}-capture.zip", game.app_id));
+    let zip_path = staging_path(game.app_id)?;
     let file = File::create(&zip_path)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let mut file_count = 0u64;
+    let mut saved_at: Option<u64> = None;
     for entry in &entries {
         let mut content = Vec::new();
-        File::open(&entry.source)
-            .and_then(|mut f| f.read_to_end(&mut content))
-            .with_context(|| format!("reading {}", entry.source.display()))?;
+        let mut source = File::open(&entry.source).with_context(|| format!("reading {}", entry.source.display()))?;
+        source.read_to_end(&mut content).with_context(|| format!("reading {}", entry.source.display()))?;
         hasher.update(entry.zip_name.as_bytes());
         hasher.update((content.len() as u64).to_le_bytes());
         hasher.update(&content);
-        zip.start_file(entry.zip_name.clone(), options)?;
+        // The file's own time goes into the zip, so a restore can put it
+        // back (and `saved_at` survives a round trip through the cloud).
+        let modified = source.metadata().and_then(|m| m.modified()).ok().map(unix_secs);
+        let mut entry_options = options;
+        if let Some(secs) = modified {
+            saved_at = saved_at.max(Some(secs));
+            if let Some(dt) = zip_time(secs) {
+                entry_options = entry_options.last_modified_time(dt);
+            }
+        }
+        zip.start_file(entry.zip_name.clone(), entry_options)?;
         zip.write_all(&content)?;
         file_count += 1;
     }
@@ -185,7 +224,7 @@ pub fn capture(
 
     let content_hash = format!("{:x}", hasher.finalize());
     let size = fs::metadata(&zip_path)?.len();
-    Ok(Some(Snapshot { zip_path, content_hash, file_count, size, mounts }))
+    Ok(Some(Snapshot { zip_path, content_hash, file_count, size, mounts, saved_at }))
 }
 
 /// Extract a snapshot zip onto this machine by re-resolving each mount's
@@ -193,19 +232,28 @@ pub fn capture(
 /// snapshot contains (callers snapshot current state first — D14).
 ///
 /// Each mount goes where `resolve::restore_target` says, which maps a
-/// location captured on another OS (`from_os`, the version's OS) to this
-/// OS's rule for it (`files` is the game's current manifest rules). A mount with no counterpart here (e.g. a
-/// Linux-only location restored on Windows) is expected for cross-OS
-/// restores, not a fatal error, so it's skipped rather than aborting.
+/// location captured on another OS (the version's OS) to this OS's rule for
+/// it (`files` is the game's current manifest rules). A mount with no
+/// counterpart here (e.g. a Linux-only location restored on Windows) is
+/// expected for cross-OS restores, not a fatal error, so it's skipped
+/// rather than aborting.
+///
+/// Each file is written to a temporary sibling and renamed into place, so
+/// an interrupted restore never leaves a truncated save. Files get their
+/// recorded modification times back (versions with `saved_at` only; older
+/// zips carry the capture time instead). Entries that would land outside
+/// their save location are refused: the zips come from cloud storage that
+/// others might be able to write to.
 pub fn extract(
     zip_bytes: &[u8],
-    mounts: &[Mount],
+    version: &crate::store::Version,
     files: &HashMap<String, FileRule>,
     os: Os,
-    from_os: Option<Os>,
     game: &InstalledGame,
     dry_run: bool,
 ) -> Result<u64> {
+    let mounts = &version.mounts;
+    let from_os = Os::from_name(&version.os);
     let mut archive = ZipArchive::new(io::Cursor::new(zip_bytes))?;
     let mut written = 0u64;
     let mut skipped_mounts: HashSet<String> = HashSet::new();
@@ -219,7 +267,7 @@ pub fn extract(
         let Some((mount_id, rel)) = name.split_once('/') else {
             bail!("malformed snapshot entry: {name}");
         };
-        if rel.split('/').any(|seg| seg == "..") {
+        if !is_safe_relative(rel) {
             bail!("snapshot entry escapes its mount: {name}");
         }
         let mount = mounts
@@ -253,18 +301,44 @@ pub fn extract(
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out = File::create(&target)
-                .with_context(|| format!("writing {}", target.display()))?;
-            io::copy(&mut entry, &mut out)?;
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            let modified = version
+                .saved_at
+                .and(entry.last_modified())
+                .and_then(zip_time_secs)
+                .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+            crate::fsutil::write_atomic_with(&target, &bytes, |tmp| {
+                if let Some(time) = modified {
+                    File::options().write(true).open(tmp)?.set_modified(time)?;
+                }
+                Ok(())
+            })?;
         }
         written += 1;
     }
     Ok(written)
 }
 
+/// A zip entry path (after its mount) that stays inside the mount: plain
+/// names only — no `..`, no root or drive prefix, and no backslashes
+/// (Windows would read them as separators).
+fn is_safe_relative(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains('\\')
+        && !rel.contains(':')
+        && Path::new(rel).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 /// Where one zip entry of `mount` goes, given the location chosen for it.
 /// `Err` is a reason to skip the mount.
 fn entry_target(mount: &Mount, target: &resolve::RestoreTarget, rel: &str) -> Result<PathBuf, String> {
+    // The wildcard stood for one path segment (e.g. a user id).
+    if let Some(value) = &mount.wildcard {
+        if value.is_empty() || value.contains(['/', '\\', ':']) || value == "." || value == ".." {
+            return Err(format!("unsafe recorded value {value:?} for the wildcard in {}", mount.template));
+        }
+    }
     let fill = |p: &str| -> Result<String, String> {
         match (&mount.wildcard, p.contains('*')) {
             (Some(value), true) => Ok(p.replace('*', value)),
@@ -331,6 +405,32 @@ mod tests {
         // Not remapped: the recorded wildcard fills the pattern as before.
         let t = entry_target(&mount, &target(&mount.template.clone(), "C:/Docs/My Games/Game/profile*.sav", false), FILE_SENTINEL);
         assert_eq!(t.unwrap(), PathBuf::from("C:/Docs/My Games/Game/profile1.sav"));
+    }
+
+    #[test]
+    fn entries_outside_their_mount_are_refused() {
+        for bad in ["../x", "a/../../x", "/etc/passwd", "a\\..\\x", "C:/x", "C:x", "", "a//b/../../.."] {
+            assert!(!is_safe_relative(bad), "{bad:?} must be refused");
+        }
+        for good in ["slot1.sav", "nested/slot2.sav", "@file", "a b/c.d"] {
+            assert!(is_safe_relative(good), "{good:?} is fine");
+        }
+        let target = resolve::RestoreTarget {
+            template: "<home>/Game/*".into(),
+            path: "/home/u/Game/*".into(),
+            file_pattern: false,
+            remapped: false,
+        };
+        let mount = |w: &str| Mount { mount: "p0".into(), template: "<home>/Game/*".into(), wildcard: Some(w.into()) };
+        assert!(entry_target(&mount("../../etc"), &target, "x").is_err());
+        assert!(entry_target(&mount(".."), &target, "x").is_err());
+        assert_eq!(entry_target(&mount("123"), &target, "x").unwrap(), PathBuf::from("/home/u/Game/123/x"));
+    }
+
+    #[test]
+    fn file_times_survive_a_zip_round_trip() {
+        let secs = 1_760_000_000; // even: zip times have 2 s resolution
+        assert_eq!(zip_time(secs).and_then(zip_time_secs), Some(secs));
     }
 
     #[test]

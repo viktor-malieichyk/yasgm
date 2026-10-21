@@ -781,7 +781,9 @@ fn pending_location_cmd(args: &[String]) -> Result<()> {
 fn sync_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
-    run_sync(only, dry_run).map(drop)
+    let failed = run_sync(only, dry_run)?.iter().filter(|e| e.kind == "error").count();
+    ensure!(failed == 0, "{failed} game(s) failed to sync (see above)");
+    Ok(())
 }
 
 /// Something from a sync run worth telling the user about (the daemon keeps
@@ -827,20 +829,13 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
             ModeOverride::Auto => ctx.auto_backup_only(game.app_id, &merged),
         };
         let keep = game_cfg.keep.unwrap_or(store::DEFAULT_KEEP);
-        let last_hash = state
-            .get(&ctx.account, game.app_id)
-            .map(|s| s.last_hash.clone());
-
-        let (outcome, update) = match sync::sync_game(
-            &store,
-            &merged.files,
-            game,
-            ctx.os,
-            backup_only,
-            last_hash.as_deref(),
-            keep,
-            dry_run,
-        ) {
+        let last = state.get(&ctx.account, game.app_id);
+        let job = sync::Job { store: &store, files: &merged.files, game, os: ctx.os, backup_only, keep, dry_run };
+        let result = sync::sync_game(
+            &job,
+            last.map(|l| sync::LastSync { hash: &l.last_hash, local_hash: l.local_hash.as_deref() }),
+        );
+        let (outcome, update) = match result {
             Ok(result) => result,
             Err(e) if e.downcast_ref::<onedrive::QuotaExceeded>().is_some() => {
                 eprintln!(
@@ -852,7 +847,13 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
                 events.push(SyncEvent::for_game(game, "quota_exceeded", "OneDrive is out of storage space".into()));
                 break;
             }
-            Err(e) => return Err(e),
+            // One game failing (an unreadable or locked save file, a network
+            // error) mustn't stop the rest.
+            Err(e) => {
+                eprintln!("{}: sync failed: {e:#}", game.name);
+                events.push(SyncEvent::for_game(game, "error", format!("{e:#}")));
+                continue;
+            }
         };
 
         match outcome {
@@ -883,20 +884,29 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
                 );
                 events.push(SyncEvent::for_game(game, "cloud_ahead", v.machine.clone()));
             }
-            sync::Outcome::Conflict { uploaded, pinned } => {
-                let verb = if uploaded.pending { "saved locally (pending — offline) as" } else { "uploaded as" };
+            sync::Outcome::Conflict { active, pinned, local_won: true, .. } => {
+                let verb = if active.pending { "saved locally (pending — offline) as" } else { "active as" };
                 println!(
-                    "{}: CONFLICT — local {verb} active version {}; previous cloud head pinned \
-                     as {} (kept until you delete it: `yasgm rm {} {}`)",
-                    game.name, uploaded.id, pinned, game.app_id, pinned
+                    "{}: CONFLICT — saves changed here and elsewhere; this machine's (newer) are {verb} \
+                     version {}; the other side is pinned as {} (kept until you delete it: `yasgm rm {} {}`)",
+                    game.name, active.id, pinned, game.app_id, pinned
+                );
+                events.push(SyncEvent::for_game(game, "conflict", pinned));
+            }
+            sync::Outcome::Conflict { active, pinned, local_won: false, files_written } => {
+                println!(
+                    "{}: CONFLICT — saves changed here and elsewhere; the newer ones from {} (version {}) \
+                     are now local ({files_written} files); this machine's are pinned as {} (restore: \
+                     `yasgm restore {} --version {}`)",
+                    game.name, active.machine, active.id, pinned, game.app_id, pinned
                 );
                 events.push(SyncEvent::for_game(game, "conflict", pinned));
             }
             sync::Outcome::DryRun(what) => println!("{}: {what}", game.name),
         }
 
-        if let Some((version, hash)) = update {
-            state.set(&ctx.account, game.app_id, &version, &hash);
+        if let Some(u) = update {
+            state.set(&ctx.account, game.app_id, &u.version, &u.hash, u.local_hash.as_deref());
         }
     }
     if !dry_run {
@@ -1716,7 +1726,9 @@ fn backup_cmd(args: &[String]) -> Result<()> {
                 if head.map(|h| h.content_hash.as_str()) == Some(snap.content_hash.as_str()) {
                     println!("{}: unchanged since last version", game.name);
                     let head = head.expect("checked above");
-                    state.set(&ctx.account, game.app_id, &head.id, &head.content_hash);
+                    if !head.pending {
+                        state.set(&ctx.account, game.app_id, &head.id, &head.content_hash, None);
+                    }
                     let _ = std::fs::remove_file(&snap.zip_path);
                 } else if dry_run {
                     println!(
@@ -1737,7 +1749,9 @@ fn backup_cmd(args: &[String]) -> Result<()> {
                                 version.files,
                                 human_bytes(version.size)
                             );
-                            state.set(&ctx.account, game.app_id, &version.id, &version.content_hash);
+                            if !version.pending {
+                                state.set(&ctx.account, game.app_id, &version.id, &version.content_hash, None);
+                            }
                         }
                         Err(e) if e.downcast_ref::<onedrive::QuotaExceeded>().is_some() => {
                             eprintln!(
@@ -2027,7 +2041,7 @@ fn restore_cmd(args: &[String]) -> Result<()> {
             );
         }
     }
-    let written = snapshot::extract(&bytes, &version.mounts, &files, ctx.os, Os::from_name(&version.os), game, dry_run)?;
+    let written = snapshot::extract(&bytes, &version, &files, ctx.os, game, dry_run)?;
     if dry_run {
         println!("dry run: {written} files would be restored from {}", version.id);
         return Ok(());
@@ -2041,21 +2055,28 @@ fn restore_cmd(args: &[String]) -> Result<()> {
         .is_some_and(|h| h.content_hash == version.content_hash);
     if already_head {
         let head = Store::head(&index).expect("checked above");
-        state.set(&ctx.account, app_id, &head.id, &head.content_hash);
+        let local = sync::local_hash(&files, game, ctx.os)?;
+        state.set(&ctx.account, app_id, &head.id, &head.content_hash, local.as_deref().filter(|h| *h != head.content_hash));
     } else {
         let new_head = store.push_raw(
-            &game.name,
-            app_id,
-            &bytes,
-            &version.content_hash,
-            version.files,
-            version.mounts.clone(),
-            ctx.os.name(),
+            &store::NewVersion {
+                game: &game.name,
+                app_id,
+                bytes: &bytes,
+                content_hash: &version.content_hash,
+                files: version.files,
+                mounts: version.mounts.clone(),
+                os: ctx.os.name(),
+                saved_at: version.saved_at,
+                pinned: false,
+            },
             keep,
-            false,
         )?;
         println!("restored content re-published as active version {}", new_head.id);
-        state.set(&ctx.account, app_id, &new_head.id, &new_head.content_hash);
+        if !new_head.pending {
+            let local = sync::local_hash(&files, game, ctx.os)?;
+            state.set(&ctx.account, app_id, &new_head.id, &new_head.content_hash, local.as_deref().filter(|h| *h != new_head.content_hash));
+        }
     }
     state.save()?;
     Ok(())
@@ -2282,7 +2303,7 @@ fn selftest() -> Result<()> {
     let head = Store::head(&index).context("no head")?.clone();
     ensure!(head.id == second.id, "head is not the second version");
     let bytes = store.download_version(game.app_id, &head)?;
-    let written = snapshot::extract(&bytes, &head.mounts, &files, os, Some(os), &game, false)?;
+    let written = snapshot::extract(&bytes, &head, &files, os, &game, false)?;
     ensure!(written == 2, "expected 2 restored files, wrote {written}");
 
     println!("6/7 verify contents…");
@@ -2292,45 +2313,35 @@ fn selftest() -> Result<()> {
     ensure!(slot2 == "nested save", "slot2 content mismatch: {slot2:?}");
 
     println!("7/7 sync engine matrix…");
+    let job = sync::Job { store: &store, files: &files, game: &game, os, backup_only: false, keep: 3, dry_run: false };
+    fn last(hash: &str) -> Option<sync::LastSync<'_>> {
+        Some(sync::LastSync { hash, local_hash: None })
+    }
     // In sync: nothing changed since head.
-    let (outcome, update) = sync::sync_game(
-        &store, &files, &game, os, false, Some(&head.content_hash), 3, false,
-    )?;
+    let (outcome, update) = sync::sync_game(&job, last(&head.content_hash))?;
     ensure!(matches!(outcome, sync::Outcome::InSync), "expected InSync, got {outcome:?}");
-    let (_, head_hash) = update.context("InSync should update state")?;
+    let head_hash = update.context("InSync should update state")?.hash;
     // Local edit → upload.
     std::fs::write(save_dir.join("slot1.sav"), b"selftest save v3")?;
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let (outcome, update) = sync::sync_game(
-        &store, &files, &game, os, false, Some(&head_hash), 3, false,
-    )?;
+    let (outcome, update) = sync::sync_game(&job, last(&head_hash))?;
     ensure!(matches!(outcome, sync::Outcome::Uploaded(_)), "expected Uploaded, got {outcome:?}");
-    let (_, v3_hash) = update.context("Uploaded should update state")?;
-    // Conflict: state says we last saw something neither side has.
-    std::fs::write(save_dir.join("slot1.sav"), b"selftest save v4 (divergent)")?;
+    let v3_hash = update.context("Uploaded should update state")?.hash;
+    // Conflict: state says we last saw something neither side has; local
+    // saves are the newest, so they win.
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let (outcome, _) = sync::sync_game(
-        &store, &files, &game, os, false, Some("bogus-hash-neither-side"), 3, false,
-    )?;
-    let sync::Outcome::Conflict { pinned, .. } = &outcome else {
-        anyhow::bail!("expected Conflict, got {outcome:?}");
+    std::fs::write(save_dir.join("slot1.sav"), b"selftest save v4 (divergent)")?;
+    let (outcome, _) = sync::sync_game(&job, last("bogus-hash-neither-side"))?;
+    let sync::Outcome::Conflict { pinned, local_won: true, .. } = &outcome else {
+        anyhow::bail!("expected a conflict won by local, got {outcome:?}");
     };
     let index = store.load_index(game.app_id)?.context("index missing")?;
     ensure!(
         index.versions.iter().any(|v| &v.id == pinned && v.pinned),
         "conflict loser is not pinned in index"
     );
-    // Cloud moved (simulated other machine): local unchanged → download.
-    let local_hash = index
-        .versions
-        .iter()
-        .find(|v| v.content_hash != v3_hash && !v.pinned)
-        .map(|v| v.content_hash.clone())
-        .context("no divergent head")?;
-    let _ = local_hash;
-    let (outcome, _) = sync::sync_game(
-        &store, &files, &game, os, false, Some(&v3_hash), 3, false,
-    )?;
+    // Cloud moved (as if from another machine): local unchanged → download.
+    let (outcome, _) = sync::sync_game(&job, last(&v3_hash))?;
     ensure!(
         matches!(outcome, sync::Outcome::Downloaded { .. } | sync::Outcome::InSync),
         "expected Downloaded/InSync after cloud moved, got {outcome:?}"

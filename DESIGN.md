@@ -20,7 +20,7 @@ Steam games only; no Proton/CrossOver on Mac in scope).
 | D2 | Steam Cloud games | Not synced. Instead they get **backup-only mode**: versioned snapshots taken automatically, **restore is manual only**, backup count configurable. |
 | D3 | Launchers | **Steam first**; library-provider abstraction so GOG/Epic/Heroic can be added later. |
 | D4 | Multi-account | Cloud namespace is **per Steam account ID** (two users on one machine never collide). |
-| D5 | Conflicts | **Keep both.** Latest becomes active; the other is preserved as a pinned version until the user deletes it manually (exempt from retention pruning). |
+| D5 | Conflicts | **Keep both.** Latest becomes active; the other is preserved as a pinned version until the user deletes it manually (exempt from retention pruning). *Latest* = whose save files were written last (newest file modification time in the snapshot, `saved_at`), not whichever side happens to run the sync (clarified 2026-10-21; backup-only games always keep local active). |
 | D6 | Language | **Rust.** |
 | D7 | Save-location data | Consume the **Ludusavi Manifest** (compiled from PCGamingWiki); do not scrape PCGW ourselves. Support `.ludusavi.yaml` secondary manifests later. |
 | D8 | Cloud providers | Modular provider trait. **OneDrive first** (native Microsoft Graph client, `Files.ReadWrite.AppFolder` scope, approot folder). No rclone dependency. |
@@ -48,14 +48,9 @@ Steam games only; no Proton/CrossOver on Mac in scope).
 
 ## Deferred follow-ups (do later, not scheduled)
 
-- **Stale local files after a download (found 2026-10-20).** Restore and
-  download never delete local files (D14), so a file that exists only on
-  this machine survives a download; local then differs from the downloaded
-  head and the next sync uploads it as one extra version. No data loss.
-  Fix: after a download, delete files the previous synced version had that
-  the downloaded one doesn't (the current state is preserved as a pinned
-  version first, so it stays recoverable). Needs the previous version's
-  file list; decide whether to do it for restore too or only for sync.
+- **Stale local files after a download (found 2026-10-20)** — the extra
+  upload is fixed (2026-10-21, `local_hash`, see Code review item 13); the
+  files themselves still aren't deleted (D14), which is fine.
 
 ## Research summary (2026-07-17)
 
@@ -1567,6 +1562,76 @@ and fast until the release is otherwise ready). Status is tracked inline.
 Explicitly **post-1.0**: Flathub desktop GUI on SteamOS, Linux desktop
 tray, extra cloud providers, GOG/Epic libraries (D3), Windows code signing,
 package-manager listings, Decky store submission (not planned, D21).
+
+## Code review 2026-10-21 — findings and fixes
+
+A strict review of the whole codebase (owner's request) found the issues
+below; they're fixed one by one, in this order. Status inline.
+
+1. **Offline backups jumped ahead of newer saves — FIXED.** `flush_pending`
+   re-pushed each pending version with a new id and *the current time*, so
+   a backup made offline at 10:00 and uploaded at 12:00 beat another
+   machine's 11:00 version, and the sync reported "in sync" while other
+   machines downloaded the older saves. Now pending versions keep their id,
+   date and machine when they move (`push_raw_to(…, existing)`; a different
+   version holding the same id gets a suffix, same content counts as
+   already moved), and `sync_game` judges "did the cloud change?" against
+   the newest version *not* made by this machine while offline
+   (`cloud_head` excludes pending and just-flushed ids). A pending upload is
+   never recorded as synced in state.json, so the next online run still
+   knows the last common version and reports a real conflict.
+2. **One failed flush blocked a game's offline backups for good — FIXED.**
+   The pending index is rewritten after every moved version (it used to
+   keep entries whose zips were already deleted → every later flush failed
+   on the missing zip, silently). Flush failures are now printed.
+3. **One bad game stopped the whole sync — FIXED.** `run_sync` records an
+   `error` event for that game and continues; state.json is always saved;
+   `yasgm sync` exits non-zero if any game failed. Quota exhaustion still
+   stops the run (every further upload would fail too).
+4. **Conflicts always made the local side active — FIXED** (D5 clarified).
+   Snapshots record `saved_at` (newest file mtime) and the file times
+   themselves (zip entry times, UTC); versions carry `saved_at`. In a
+   conflict the newer saves win: local newer → cloud head pinned, local
+   active (an existing version with the local content is reused, not
+   duplicated); cloud newer → local preserved as pinned (or its existing
+   version pinned), cloud head downloaded. Downloads restore file times
+   (versions with `saved_at` only — older zips carry capture times), so a
+   download doesn't make old saves look new. Old versions without
+   `saved_at` compare by `created`.
+9. **Pruned zips were deleted before the index was saved — FIXED.**
+   `apply_retention` only edits the index; the zips go after the index is
+   written, so a failure leaves unreferenced zips, never dangling entries.
+13. **Restores weren't crash-safe; partial restores re-uploaded — FIXED.**
+    `extract` writes each file via temp + rename (`fsutil`). After every
+    download/restore the local files are re-hashed; if they differ from the
+    version (a location skipped cross-OS, or local-only files a download
+    doesn't delete), state.json records `local_hash`, and a local state
+    equal to it counts as unchanged. This also settles the old "stale local
+    files" follow-up: no extra version is uploaded (the files still aren't
+    deleted — D14).
+14. **Preview runs could delete a real sync's staging zip — FIXED.** Each
+    capture gets its own staging file (`<appid>-<pid>-<n>.zip`).
+16. **Archive entries could escape the save folder — FIXED.** Entry paths
+    must be plain relative names (no `..`, root, drive, `:` or backslash),
+    and a recorded wildcard value must be one plain segment.
+
+Remaining from the review, in order: 5 (periodic cloud check in the
+daemon), 6 (control socket thread per connection), 17 (desktop app: HTML
+injection, CSP, `open_path`), 7 (machine name without `hostname`), 8
+(daemon reloads its game list/settings; no manifest re-parse per sync), 10
+(conditional index writes), 11 (cloud read errors vs. "no saves"), 12
+(OneDrive retries, token renewal, lazy token so offline backups work
+after the token expires), 15 (corrupt config/state files), 18 (signed
+plugin updates), 19 (frozen game after a plugin crash), then code health
+(split `main.rs`, `backup` = sync without downloads, fewer
+`too_many_arguments`, logged instead of discarded errors, clock-skew
+warning).
+
+Tests: `sync.rs` now has unit tests for every branch with two simulated
+machines sharing a local-folder "cloud" (first upload, download, backup-only,
+both conflict directions, offline backup older/newer than other progress,
+local-only files after a download), plus an interrupted-flush test in
+`store.rs`. `selftest` (real OneDrive) passes.
 
 ### Test environment: steamac VM
 

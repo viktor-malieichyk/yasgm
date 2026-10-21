@@ -190,7 +190,7 @@ function eventToast(e: SyncEvent): string {
     case "downloaded":
       return `Newer saves from ${e.detail} restored — ${game}`;
     case "conflict":
-      return `${game}: saves changed here and on another device — kept both; the other version is pinned`;
+      return `${game}: saves changed here and on another device — kept both; the newer ones are in use, the older are pinned`;
     case "cloud_ahead":
       return `${game}: newer saves from ${e.detail} are in the cloud — restore them in YASGM if you want them`;
     case "quota_exceeded":

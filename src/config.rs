@@ -82,6 +82,10 @@ pub struct Config {
 pub struct GameState {
     pub last_version: String,
     pub last_hash: String,
+    /// Local files' hash right after that sync, when it differs from
+    /// `last_hash` (see `sync::LastSync::local_hash`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_hash: Option<String>,
     pub synced_at: u64,
 }
 
@@ -140,12 +144,13 @@ impl State {
         self.games.get(&format!("{account}/{app_id}"))
     }
 
-    pub fn set(&mut self, account: &str, app_id: u64, version: &str, hash: &str) {
+    pub fn set(&mut self, account: &str, app_id: u64, version: &str, hash: &str, local_hash: Option<&str>) {
         self.games.insert(
             format!("{account}/{app_id}"),
             GameState {
                 last_version: version.to_owned(),
                 last_hash: hash.to_owned(),
+                local_hash: local_hash.map(str::to_owned),
                 synced_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
