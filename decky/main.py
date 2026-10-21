@@ -8,6 +8,7 @@ shares its config, state and lock with a desktop-mode YASGM.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -193,9 +194,8 @@ def http_get(url: str, accept: str = "application/vnd.github+json") -> bytes:
 
 
 def plugin_releases() -> list:
-    """Published (non-draft, non-prerelease) releases with a plugin zip, newest
-    first: [{version, url, hash, notes, asset}]. `hash` is the zip's SHA-256
-    from GitHub's asset digest, else from the `.sha256` file next to it."""
+    """Published (non-draft, non-prerelease) releases with a plugin zip and
+    its signature, newest first: [{version, url, sig, notes}]."""
     found = []
     for release in json.loads(http_get(RELEASES_API)):
         if release.get("draft") or release.get("prerelease"):
@@ -205,27 +205,17 @@ def plugin_releases() -> list:
             match = PLUGIN_ZIP.match(asset.get("name", ""))
             if not match:
                 continue
-            found.append({
-                "version": match.group(1),
-                "url": asset["browser_download_url"],
-                "digest": asset.get("digest") or "",
-                "sums": next((a["browser_download_url"] for a in assets if a.get("name") == asset["name"] + ".sha256"), None),
-                "notes": (release.get("body") or "").strip(),
-            })
+            sig = next((a["browser_download_url"] for a in assets if a.get("name") == asset["name"] + ".sig"), None)
+            if sig:  # unsigned releases can't be verified, so aren't offered
+                found.append({
+                    "version": match.group(1),
+                    "url": asset["browser_download_url"],
+                    "sig": sig,
+                    "notes": (release.get("body") or "").strip(),
+                })
             break
     found.sort(key=lambda r: version_key(r["version"]), reverse=True)
     return found
-
-
-def release_hash(release: dict) -> str:
-    if release["digest"].startswith("sha256:"):
-        return release["digest"][len("sha256:"):]
-    if release["sums"]:
-        text = http_get(release["sums"], accept="application/octet-stream").decode(errors="replace")
-        value = text.split()[0] if text.split() else ""
-        if re.fullmatch(r"[0-9a-fA-F]{64}", value):
-            return value.lower()
-    raise RuntimeError(f"release {release['version']} has no SHA-256 for its plugin zip")
 
 
 def update_info() -> dict:
@@ -235,7 +225,7 @@ def update_info() -> dict:
     releases = plugin_releases()
     newer = [r for r in releases if version_key(r["version"]) > version_key(current)]
     older = [r for r in releases if version_key(r["version"]) < version_key(current)]
-    pick = lambda r: r and {"version": r["version"], "url": r["url"], "hash": release_hash(r), "notes": r["notes"][:600]}
+    pick = lambda r: r and {"version": r["version"], "url": r["url"], "sig": r["sig"], "notes": r["notes"][:600]}
     return {
         "current": current,
         "update": pick(newer[0] if newer else None),
@@ -425,6 +415,36 @@ class Plugin:
         if force or not self.updates or time.time() - self.updates["checked_at"] > UPDATE_CACHE_SECS:
             self.updates = await asyncio.to_thread(update_info)
         return self.updates
+
+    async def prepare_install(self, version: str) -> dict:
+        """Downloads the release zip offered for `version` and checks its
+        signature with the bundled yasgm (release key, D21); returns the
+        URL and the SHA-256 of exactly the verified bytes. Decky downloads
+        the zip again and refuses it unless that hash matches, so what gets
+        installed is what was verified."""
+        info = self.updates or {}
+        release = next((r for r in (info.get("update"), info.get("previous")) if r and r["version"] == version), None)
+        if release is None:
+            raise RuntimeError(f"no release {version} offered; check for updates first")
+        data, sig = await asyncio.to_thread(
+            lambda: (http_get(release["url"], accept="application/octet-stream"), http_get(release["sig"], accept="application/octet-stream"))
+        )
+        work = os.path.join(getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", decky.DECKY_PLUGIN_LOG_DIR), "update")
+        os.makedirs(work, exist_ok=True)
+        zip_path, sig_path = os.path.join(work, "plugin.zip"), os.path.join(work, "plugin.zip.sig")
+        with open(zip_path, "wb") as f:
+            f.write(data)
+        with open(sig_path, "wb") as f:
+            f.write(sig)
+        try:
+            await run("verify-update", zip_path, sig_path, timeout=60)
+        finally:
+            for path in (zip_path, sig_path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return {"version": version, "url": release["url"], "hash": hashlib.sha256(data).hexdigest()}
 
     async def get_versions(self, app_id: int) -> list:
         return await run_json("versions", str(app_id), "--json")

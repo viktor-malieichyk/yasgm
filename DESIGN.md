@@ -357,26 +357,35 @@ swapped plugin directories itself, which a non-root plugin can't do —
 `~/homebrew/plugins` belongs to root):
 
 - `.github/workflows/release.yml` (step 7): pushing tag `v<version>`
-  builds `yasgm-decky-<ver>.zip` + `.sha256` on ubuntu (rustup + zig +
+  builds `yasgm-decky-<ver>.zip` + `.sha256` + `.sig` on ubuntu (rustup + zig +
   cargo-zigbuild, same `scripts/package-decky.sh`) next to the desktop
   bundles, in one release published only when all are uploaded.
 - Backend `check_update`: `api.github.com/repos/viktor-malieichyk/yasgm/
   releases` (not `/latest`, so desktop-only releases don't hide the plugin),
   skips drafts/prereleases, takes the zip named `yasgm-decky-<ver>.zip`,
-  version from the file name. SHA-256 from GitHub's asset `digest`, else
-  the `.sha256` asset; a release without one is refused. Cached 6 h;
+  version from the file name; a release without a `.sig` asset isn't
+  offered. Cached 6 h;
   checked 60 s after load and every 12 h; a newer version is toasted once.
-- Install = **Decky Loader's own route** `utilities/install_plugin(url,
-  "YASGM", version, sha256, UPDATE=2)` via `window.DeckyBackend.call` from
-  the frontend. The loader (root) asks the user to confirm, downloads,
+- Install: the backend's `prepare_install(version)` downloads the zip and
+  its `.sig`, checks the signature with the bundled binary (`yasgm
+  verify-update`, the D20 updater key single-sourced from
+  `tauri.conf.json`, `minisign-verify`), and returns the SHA-256 of the
+  verified bytes. Then **Decky Loader's own route**
+  `utilities/install_plugin(url, "YASGM", version, sha256, UPDATE=2)` via
+  `window.DeckyBackend.call` from the frontend — the loader downloads again
+  and refuses anything whose hash differs, so only the verified bytes get
+  installed. The loader (root) asks the user to confirm, downloads,
   checks the hash, uninstalls the old copy, unzips, chowns and reloads —
   our `_unload` stops the daemon cleanly first. Never automatic.
 - Rollback: About → "Reinstall <previous>" installs the newest older
   release the same way (DOWNGRADE=3). No `.bak` dir.
-- Trust: HTTPS from GitHub + the hash in the same release — protects
-  integrity, not against a compromised GitHub account. A minisign
-  signature (the D20 key) was planned; dropped for now because Decky's
-  Python has no ed25519 without extra packages. Revisit before wider use.
+- Trust (2026-10-21, code review item 18): the release key's signature —
+  a compromised GitHub account or release can't push an update without
+  the key. Verified in Rust by the already-installed (trusted) binary, so
+  Decky's Python needs no ed25519. Signing: `scripts/package-decky.sh`
+  signs when `TAURI_SIGNING_PRIVATE_KEY` is set (CI sets
+  `REQUIRE_SIGNATURE=1`). Plugin builds from before this verify nothing
+  (hash only) — the first signed release reaches them that way once.
 - Side effect: for a non-"dev" version the loader posts an install-count
   ping to the Decky store URL; it fails harmlessly for an unlisted plugin.
 
@@ -1699,7 +1708,15 @@ below; they're fixed one by one, in this order. Status inline.
     kernel only lets it signal its own processes). Tested on macOS with a
     stopped `sleep` (T → S); not yet on SteamOS.
 
-Remaining from the review, in order: 18 (signed plugin updates), then code health
+18. **Plugin updates were only hash-checked — FIXED.** See
+    [SteamOS self-update](#steamos-in-plugin-self-update-sideloaded-d21):
+    signed zips, verified by `yasgm verify-update` before Decky installs
+    them. Tested: a fixture signed with the real key verifies and a
+    one-bit change doesn't (unit test); `prepare_install` on the Mac
+    (stub `decky`) accepted the freshly signed plugin zip with the right
+    hash and refused the same zip with one byte appended.
+
+Remaining from the review: code health
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
 warning).

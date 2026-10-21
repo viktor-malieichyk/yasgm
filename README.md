@@ -58,8 +58,10 @@ pulled in before a game starts. Toasts tell you what happened.
   (Settings → Updates) and offers **Install & restart**. Updates are signed
   and verified before they're installed.
 - **Steam Deck:** the plugin checks GitHub twice a day and shows **Update to
-  <version>** in its panel; Decky asks you to confirm, checks the download's
-  SHA-256 and reloads the plugin. **About → Reinstall <previous>** rolls back.
+  <version>** in its panel. It installs only releases signed with the
+  project's release key (checked on the Deck before installing); Decky asks
+  you to confirm and reloads the plugin. **About → Reinstall <previous>**
+  rolls back.
 
 ## Privacy
 
@@ -111,6 +113,9 @@ yasgm restore <appid> [--version <id>]
 yasgm config [<appid> --mode auto|sync|backup|off --keep N|default]
 yasgm pin|unpin|rm <appid> <version-id>
 yasgm provider onedrive|local <folder>|disconnect|status
+yasgm cloud-games [--json]   # games with cloud saves that aren't installed here
+yasgm move-account <from> [--to <account>] [--dry-run] [--keep-source]
+                             # move saves uploaded under another Steam account
 ```
 
 State-changing commands accept `--dry-run`. For guaranteed sync around a

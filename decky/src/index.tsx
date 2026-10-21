@@ -54,7 +54,6 @@ interface DaemonState {
 interface Release {
   version: string;
   url: string;
-  hash: string;
   notes: string;
 }
 
@@ -150,6 +149,7 @@ const getDaemonState = callable<[], DaemonState>("get_daemon_state");
 const getGames = callable<[fresh: boolean], Game[]>("get_games");
 const getCloudGames = callable<[fresh: boolean], CloudGame[]>("get_cloud_games");
 const getIcons = callable<[fresh: boolean], Record<string, string>>("get_icons");
+const prepareInstall = callable<[version: string], { version: string; url: string; hash: string }>("prepare_install");
 const checkUpdate = callable<[force: boolean], UpdateInfo>("check_update");
 const getVersions = callable<[appId: number], Version[]>("get_versions");
 const syncNow = callable<[appId: number], string>("sync_now");
@@ -168,6 +168,8 @@ const KEEP_CHOICES = [3, 5, 10, 20, 50];
 // Decky Loader's own installer (its `utilities/install_plugin` route): it
 // asks the user to confirm, downloads the zip, checks the SHA-256, replaces
 // this plugin and reloads it — the plugin itself can't write its folder.
+// The hash comes from `prepare_install`, which first downloaded the zip and
+// checked its signature, so Decky only installs the verified bytes.
 declare global {
   interface Window {
     DeckyBackend: { call<Args extends unknown[], R = void>(route: string, ...args: Args): Promise<R> };
@@ -177,8 +179,13 @@ const PLUGIN_NAME = "YASGM"; // plugin.json "name": the install Decky replaces
 const INSTALL_UPDATE = 2;
 const INSTALL_DOWNGRADE = 3;
 
-function installRelease(release: Release, type: number) {
-  return window.DeckyBackend.call("utilities/install_plugin", release.url, PLUGIN_NAME, release.version, release.hash, type);
+async function installRelease(release: Release, type: number) {
+  try {
+    const verified = await prepareInstall(release.version);
+    await window.DeckyBackend.call("utilities/install_plugin", verified.url, PLUGIN_NAME, verified.version, verified.hash, type);
+  } catch (err) {
+    toaster.toast({ title: "YASGM", body: `Update not installed: ${errorText(err)}` });
+  }
 }
 
 /** Toast text for a sync event from the daemon. */

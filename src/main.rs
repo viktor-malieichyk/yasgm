@@ -16,6 +16,7 @@ mod onedrive;
 mod provider;
 mod resolve;
 mod running;
+mod signature;
 mod snapshot;
 mod steam;
 mod store;
@@ -2364,6 +2365,20 @@ fn rm_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `verify-update <file> <file.sig>`: checks a release file against the
+/// release key (the Deck plugin runs this before installing an update).
+fn verify_update_cmd(args: &[String]) -> Result<()> {
+    let pos = positionals(args);
+    let (Some(file), Some(sig)) = (pos.first(), pos.get(1)) else {
+        anyhow::bail!("usage: yasgm verify-update <file> <file.sig>");
+    };
+    let data = std::fs::read(file).with_context(|| format!("reading {file}"))?;
+    let sig = std::fs::read_to_string(sig).with_context(|| format!("reading {sig}"))?;
+    signature::verify(&data, &sig).with_context(|| format!("{file} is not a genuine YASGM release"))?;
+    println!("signature ok");
+    Ok(())
+}
+
 // ---- selftest -------------------------------------------------------------
 
 /// End-to-end roundtrip against the real cloud using a synthetic game:
@@ -2660,6 +2675,7 @@ fn main() -> Result<()> {
         Some("pin") => pin_cmd(&args, true),
         Some("unpin") => pin_cmd(&args, false),
         Some("rm") => rm_cmd(&args),
+        Some("verify-update") => verify_update_cmd(&args),
         Some("selftest") => selftest(),
         Some(other) => {
             eprintln!(

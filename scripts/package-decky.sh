@@ -33,4 +33,15 @@ zip_path="$repo_root/dist/yasgm-decky-$version.zip"
 rm -f "$zip_path"
 (cd "$stage" && zip -qr -X "$zip_path" yasgm)
 (cd "$repo_root/dist" && shasum -a 256 "$(basename "$zip_path")" > "$(basename "$zip_path").sha256")
+rm -f "$zip_path.sig"
+# Release signature (D21): the plugin's self-update only installs zips that
+# verify against the release key. Needs the key in the environment
+# (`source ~/.tauri/yasgm-signing.env` locally, repo secrets in CI).
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  (cd "$repo_root/ui" && { [[ -d node_modules ]] || npm ci --no-audit --no-fund; } && npx tauri signer sign "$zip_path" >/dev/null)
+  echo "signed $zip_path.sig"
+elif [[ "${REQUIRE_SIGNATURE:-}" == 1 ]]; then
+  echo "error: TAURI_SIGNING_PRIVATE_KEY not set; can't sign the release zip" >&2
+  exit 1
+fi
 echo "built $zip_path ($(du -h "$zip_path" | cut -f1))"

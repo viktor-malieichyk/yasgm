@@ -3,7 +3,8 @@
 #   - macOS app bundles (Apple Silicon + Intel: .dmg, updater .app.tar.gz + .sig)
 #   - the Windows installer (NSIS .exe + .sig)
 #   - latest.json — the desktop auto-update feed (D20), merged across builds
-#   - the Decky plugin zip + .sha256 (in-plugin self-update, D21)
+#   - the Decky plugin zip + .sha256 + .sig (in-plugin self-update, D21;
+#     the plugin only installs zips whose signature verifies)
 # The release stays a draft until every build has uploaded, so neither the
 # desktop updater (releases/latest) nor the plugin (skips drafts) can see a
 # half-filled one.
@@ -127,13 +128,21 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: decky/package-lock.json
-      - name: Build the plugin zip
+      - name: Install UI dependencies (for `tauri signer`)
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+      - name: Build and sign the plugin zip
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          REQUIRE_SIGNATURE: "1"
         run: scripts/package-decky.sh
       - name: Attach to the release
         run: |
           version="${TAG#v}"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            "dist/yasgm-decky-$version.zip" "dist/yasgm-decky-$version.zip.sha256"
+            "dist/yasgm-decky-$version.zip" "dist/yasgm-decky-$version.zip.sha256" \
+            "dist/yasgm-decky-$version.zip.sig"
 
   publish:
     name: Publish release
