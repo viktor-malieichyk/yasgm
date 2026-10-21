@@ -44,14 +44,21 @@ jobs:
         run: scripts/version.sh --check "$TAG"
       - id: draft
         name: Draft release
+        # The id comes from the create call itself: a just-created draft can
+        # take a moment to show up in the release list (the first run got an
+        # empty id that way). A re-run reuses the existing draft.
         run: |
           find_id() { gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1; }
           id="$(find_id)"
           if [[ -z "$id" ]]; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-              --title "YASGM $TAG" --generate-notes
-            id="$(find_id)"
+            id="$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$TAG" -f name="YASGM $TAG" \
+              -F draft=true -F generate_release_notes=true --jq .id)"
           fi
+          if [[ -z "$id" ]]; then
+            echo "::error::no release id for $TAG" >&2
+            exit 1
+          fi
+          echo "release $TAG: id $id"
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   desktop:
