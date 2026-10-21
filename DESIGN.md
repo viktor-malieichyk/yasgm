@@ -1559,6 +1559,17 @@ and fast until the release is otherwise ready). Status is tracked inline.
    the password never passes through the assistant). Two separate macOS
    bundles instead of a universal one: the sidecar script builds one
    target triple at a time.
+   **First release v0.2.0 published 2026-10-21.** The first run built
+   everything but attached only the Decky files: the `release` job looked
+   the new draft up in the release list before it appeared there, so its id
+   was empty (tauri-action uploaded nowhere, publish 404'd). Fixed by taking
+   the id from the create call (and failing early without one); re-run via
+   `workflow_dispatch` with `tag=v0.2.0` reused the draft. Checked from
+   outside: `releases/latest/download/latest.json` is 0.2.0 with signed
+   entries for darwin-aarch64/x86_64 and windows-x86_64; the plugin's
+   release query sees the zip + `.sha256` + `.sig`, and the downloaded zip
+   passes `yasgm verify-update`. Builds: macOS ~7 min, Windows ~7–11 min,
+   Decky ~3–4 min. `version.sh` now also refreshes the npm lockfiles.
 8. Docs: README install/update instructions per platform, PCGamingWiki
    attribution (D10), privacy note (data only in the user's own cloud).
    **DONE 2026-10-20** (README rewritten: per-platform install incl.
