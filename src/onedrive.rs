@@ -372,7 +372,7 @@ impl std::error::Error for QuotaExceeded {}
 
 /// How Graph answered a request that didn't fail outright.
 enum Reply {
-    Ok(ureq::Response),
+    Ok(Box<ureq::Response>),
     NotFound,
     /// 412/409: a conditional request found the item changed (or present).
     Changed,
@@ -394,6 +394,9 @@ impl Default for Session {
     }
 }
 
+// ureq 2's error type is large (it carries the response); every request
+// closure here returns it. That's ureq's API, not something to box.
+#[allow(clippy::result_large_err)]
 impl Session {
     pub fn new() -> Session {
         Session { token: std::sync::Mutex::new(None) }
@@ -416,7 +419,7 @@ impl Session {
         for attempt in 1..=ATTEMPTS {
             let bearer = if authed { Some(format!("Bearer {}", self.token(false)?)) } else { None };
             match make(bearer.as_deref()) {
-                Ok(resp) => return Ok(Reply::Ok(resp)),
+                Ok(resp) => return Ok(Reply::Ok(Box::new(resp))),
                 Err(ureq::Error::Status(404, _)) => return Ok(Reply::NotFound),
                 Err(ureq::Error::Status(409 | 412, _)) => return Ok(Reply::Changed),
                 Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
@@ -446,7 +449,7 @@ impl Session {
 
     fn ok(&self, what: &str, authed: bool, make: impl Fn(Option<&str>) -> Result<ureq::Response, ureq::Error>) -> Result<Option<ureq::Response>> {
         match self.send(what, authed, make)? {
-            Reply::Ok(resp) => Ok(Some(resp)),
+            Reply::Ok(resp) => Ok(Some(*resp)),
             Reply::NotFound => Ok(None),
             Reply::Changed => bail!("{what}: unexpected conflict"),
         }

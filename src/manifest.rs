@@ -133,11 +133,10 @@ pub fn load() -> Result<Manifest> {
 
     let cached_etag = fs::read_to_string(&etag_path).ok();
     let mut request = ureq::get(MANIFEST_URL);
-    if yaml_path.exists() {
-        if let Some(etag) = &cached_etag {
+    if yaml_path.exists()
+        && let Some(etag) = &cached_etag {
             request = request.set("If-None-Match", etag.trim());
         }
-    }
 
     match request.call() {
         Ok(response) if response.status() == 304 => {

@@ -211,7 +211,10 @@ pub(crate) const SKELETON_HEADER: &str = r#"# YASGM local manifest overrides (D7
 /// YAML skeleton for the local manifest: one ignored placeholder entry per
 /// game, with its current save locations and unmappable OS pairs as
 /// comments (see `SKELETON_HEADER`).
-pub(crate) fn gap_skeleton(rows: &[(&String, u64, Vec<(Os, Os)>)], manifest: &manifest::Manifest) -> String {
+/// A game whose save locations can't be mapped between some OS pairs.
+type GapRow<'a> = (&'a String, u64, Vec<(Os, Os)>);
+
+pub(crate) fn gap_skeleton(rows: &[GapRow], manifest: &manifest::Manifest) -> String {
     let mut out = String::from(SKELETON_HEADER);
     for (name, id, gaps) in rows {
         let pairs: Vec<_> = gaps.iter().map(|(f, t)| format!("{}→{}", f.label(), t.label())).collect();
@@ -263,7 +266,7 @@ pub(crate) fn manifest_gaps_cmd(args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    let mut rows: Vec<(&String, u64, Vec<(Os, Os)>)> = manifest
+    let mut rows: Vec<GapRow> = manifest
         .iter()
         .filter_map(|(name, game)| {
             let id = game.steam.as_ref()?.id?;
@@ -428,11 +431,10 @@ pub(crate) fn icons_cmd(args: &[String]) -> Result<()> {
     if !flag(args, "--offline") {
         let missing: Vec<u64> =
             app_ids.iter().copied().filter(|&id| icons::resolve(root.as_deref(), &dir, id).is_none()).collect();
-        if !missing.is_empty() {
-            if let Err(err) = icons::fetch(&dir, &missing) {
+        if !missing.is_empty()
+            && let Err(err) = icons::fetch(&dir, &missing) {
                 eprintln!("icons: download skipped: {err:#}");
             }
-        }
     }
     let embed = flag(args, "--embed");
     let mut json_out = Vec::new();

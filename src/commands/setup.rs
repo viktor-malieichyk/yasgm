@@ -155,7 +155,7 @@ pub(crate) fn check_provider(provider: &config::ProviderConfig) -> Result<String
         config::ProviderConfig::None => anyhow::bail!(NOT_CONNECTED),
         config::ProviderConfig::Onedrive => cloud_summary(),
         config::ProviderConfig::Local { path } => {
-            let meta = std::fs::metadata(&path)
+            let meta = std::fs::metadata(path)
                 .with_context(|| format!("{} not accessible", path.display()))?;
             ensure!(meta.is_dir(), "{} is not a directory", path.display());
             let probe = path.join(".yasgm-write-test");

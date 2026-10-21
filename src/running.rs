@@ -68,11 +68,10 @@ fn steam_launch_app_id(cmd: &[std::ffi::OsString], environ: &[std::ffi::OsString
     let arg_id = |prefix: &str, list: &[std::ffi::OsString]| {
         list.iter().find_map(|a| a.to_str()?.strip_prefix(prefix)?.parse::<u64>().ok())
     };
-    if cmd.iter().any(|a| a == "SteamLaunch") {
-        if let Some(id) = arg_id("AppId=", cmd) {
+    if cmd.iter().any(|a| a == "SteamLaunch")
+        && let Some(id) = arg_id("AppId=", cmd) {
             return Some(id);
         }
-    }
     arg_id("SteamAppId=", environ).filter(|id| *id != 0)
 }
 
@@ -141,11 +140,10 @@ impl RunningDetector {
         };
         self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
         for process in self.system.processes().values() {
-            if let Some(app_id) = steam_launch_app_id(process.cmd(), process.environ()) {
-                if games.iter().any(|g| g.app_id == app_id) {
+            if let Some(app_id) = steam_launch_app_id(process.cmd(), process.environ())
+                && games.iter().any(|g| g.app_id == app_id) {
                     return Some(app_id);
                 }
-            }
             let Some(exe) = process.exe() else { continue };
             for (app_id, dir) in &install_dirs {
                 if exe.starts_with(dir) {

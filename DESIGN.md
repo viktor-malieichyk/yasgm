@@ -1738,7 +1738,11 @@ Code health (2026-10-21):
   event log, control-socket state, `watch status|start|stop|send`),
   `commands/{sync,setup,saves,games,selftest}`. Tests moved with their code.
 
-Remaining code health: clippy warnings
+- Clippy clean in both crates (`--all-targets`): collapsible ifs, a
+  `GapRow` alias, `sort_by_key`, a boxed `Reply::Ok`; ureq 2's large error
+  type is allowed on `onedrive::Session` with the reason.
+
+All review items are done.
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
 warning).

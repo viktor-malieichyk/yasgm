@@ -94,11 +94,10 @@ fn lookup_hashes(agent: &ureq::Agent, app_ids: &[u64]) -> Result<HashMap<u64, St
     let doc: serde_json::Value = serde_json::from_str(&body).context("parsing Steam store response")?;
     let mut hashes = HashMap::new();
     for item in doc["response"]["store_items"].as_array().into_iter().flatten() {
-        if let (Some(id), Some(hash)) = (item["appid"].as_u64(), item["assets"]["community_icon"].as_str()) {
-            if is_icon_hash(hash) {
+        if let (Some(id), Some(hash)) = (item["appid"].as_u64(), item["assets"]["community_icon"].as_str())
+            && is_icon_hash(hash) {
                 hashes.insert(id, hash.to_owned());
             }
-        }
     }
     Ok(hashes)
 }

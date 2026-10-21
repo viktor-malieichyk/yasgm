@@ -131,7 +131,7 @@ pub(crate) fn versions_cmd(args: &[String]) -> Result<()> {
         }
         let head_id = Store::head(&index).map(|h| h.id.clone());
         let mut versions = index.versions.clone();
-        versions.sort_by(|a, b| b.created.cmp(&a.created));
+        versions.sort_by_key(|v| std::cmp::Reverse(v.created));
         for v in versions {
             let active = Some(&v.id) == head_id.as_ref();
             if json {
@@ -331,8 +331,8 @@ pub(crate) fn restore_cmd(args: &[String]) -> Result<()> {
     // Non-destructive restore (D14): preserve the current local state as a
     // *pinned* version before overwriting anything (pinned so it never
     // competes with the sync head).
-    if let Some(merged) = ctx.merged_game(app_id) {
-        if let Some(snap) = snapshot::capture(&merged.files, game, ctx.os)? {
+    if let Some(merged) = ctx.merged_game(app_id)
+        && let Some(snap) = snapshot::capture(&merged.files, game, ctx.os)? {
             if snap.content_hash == version.content_hash {
                 println!("local saves already match version {}; nothing to do", version.id);
                 let _ = std::fs::remove_file(&snap.zip_path);
@@ -347,12 +347,11 @@ pub(crate) fn restore_cmd(args: &[String]) -> Result<()> {
                 println!("current local state preserved as pinned version {}", safety.id);
             }
         }
-    }
 
     let bytes = store.download_version(app_id, &version)?;
     let files = ctx.merged_game(app_id).map(|m| m.files).unwrap_or_default();
-    if let Some(from) = Os::from_name(&version.os).filter(|from| *from != ctx.os) {
-        if resolve::cross_os_gaps(&files).contains(&(from, ctx.os)) {
+    if let Some(from) = Os::from_name(&version.os).filter(|from| *from != ctx.os)
+        && resolve::cross_os_gaps(&files).contains(&(from, ctx.os)) {
             eprintln!(
                 "warning: {} was made on {}, and this game's save locations on {} and {} don't match — \
                  its files will likely be skipped",
@@ -362,7 +361,6 @@ pub(crate) fn restore_cmd(args: &[String]) -> Result<()> {
                 ctx.os.label()
             );
         }
-    }
     let written = snapshot::extract(&bytes, &version, &files, ctx.os, game, dry_run)?;
     if dry_run {
         println!("dry run: {written} files would be restored from {}", version.id);

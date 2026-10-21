@@ -127,11 +127,10 @@ fn raw_machine_name() -> String {
     }
     // Linux keeps it here; macOS has no such files and falls through.
     for path in ["/proc/sys/kernel/hostname", "/etc/hostname"] {
-        if let Ok(name) = fs::read_to_string(path) {
-            if !name.trim().is_empty() {
+        if let Ok(name) = fs::read_to_string(path)
+            && !name.trim().is_empty() {
                 return name;
             }
-        }
     }
     std::process::Command::new("hostname")
         .output()
@@ -331,11 +330,10 @@ impl Store {
         // anything stranded from a previous offline run before adding to
         // it. Failure here just means we're still offline — proceed either
         // way, since the fallback path below covers that.
-        if let Err(err) = self.flush_pending(new.app_id, keep) {
-            if !crate::provider::is_offline(&err) {
+        if let Err(err) = self.flush_pending(new.app_id, keep)
+            && !crate::provider::is_offline(&err) {
                 eprintln!("{}: offline backups not uploaded yet ({err:#})", new.game);
             }
-        }
 
         match self.push_raw_to(&*self.primary, new, keep, None) {
             Ok(version) => Ok(version),
@@ -396,8 +394,8 @@ impl Store {
 
         // Versions are ordered by each device's clock; one that runs ahead
         // makes its versions win (D5). Say so rather than fail silently.
-        if existing.is_none() {
-            if let Some(ahead) = current.iter().filter(|o| o.created > version.created + CLOCK_SKEW_WARN).max_by_key(|o| o.created) {
+        if existing.is_none()
+            && let Some(ahead) = current.iter().filter(|o| o.created > version.created + CLOCK_SKEW_WARN).max_by_key(|o| o.created) {
                 eprintln!(
                     "warning: {}: a version from {} is dated {} min in the future — that device's clock (or this \
                      one's) is wrong, which decides which saves count as newer",
@@ -406,7 +404,6 @@ impl Store {
                     (ahead.created - version.created) / 60
                 );
             }
-        }
 
         let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
         provider.upload(&zip_rel, new.bytes)?;
@@ -495,7 +492,7 @@ impl Store {
         if unpinned.len() <= keep {
             return Vec::new();
         }
-        unpinned.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        unpinned.sort_by_key(|v| std::cmp::Reverse(v.0)); // newest first
         let doomed: Vec<String> = unpinned.split_off(keep).into_iter().map(|(_, id)| id).collect();
         index.versions.retain(|v| !doomed.contains(&v.id));
         doomed
@@ -513,11 +510,10 @@ impl Store {
             Err(err) if crate::provider::is_offline(&err) => {}
             Err(err) => return Err(err),
         }
-        if let Some(index) = self.load_index_from(&*self.pending, app_id)? {
-            if index.versions.iter().any(|v| v.id == version_id) {
+        if let Some(index) = self.load_index_from(&*self.pending, app_id)?
+            && index.versions.iter().any(|v| v.id == version_id) {
                 return Ok((&*self.pending, index));
             }
-        }
         anyhow::bail!("version {version_id} not found")
     }
 

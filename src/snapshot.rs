@@ -79,13 +79,12 @@ fn zip_time_secs(dt: zip::DateTime) -> Option<u64> {
 fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
     if root.is_file() {
         out.push(root.to_path_buf());
-    } else if root.is_dir() {
-        if let Ok(entries) = fs::read_dir(root) {
+    } else if root.is_dir()
+        && let Ok(entries) = fs::read_dir(root) {
             for entry in entries.flatten() {
                 walk_files(&entry.path(), out);
             }
         }
-    }
 }
 
 /// Where a pattern segment contains `*`, return just the substring the
@@ -332,11 +331,10 @@ fn is_safe_relative(rel: &str) -> bool {
 /// `Err` is a reason to skip the mount.
 fn entry_target(mount: &Mount, target: &resolve::RestoreTarget, rel: &str) -> Result<PathBuf, String> {
     // The wildcard stood for one path segment (e.g. a user id).
-    if let Some(value) = &mount.wildcard {
-        if value.is_empty() || value.contains(['/', '\\', ':']) || value == "." || value == ".." {
+    if let Some(value) = &mount.wildcard
+        && (value.is_empty() || value.contains(['/', '\\', ':']) || value == "." || value == "..") {
             return Err(format!("unsafe recorded value {value:?} for the wildcard in {}", mount.template));
         }
-    }
     let fill = |p: &str| -> Result<String, String> {
         match (&mount.wildcard, p.contains('*')) {
             (Some(value), true) => Ok(p.replace('*', value)),

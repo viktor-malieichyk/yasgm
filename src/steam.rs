@@ -85,8 +85,8 @@ pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
         let doc = vdf::parse(&text).context("parsing libraryfolders.vdf")?;
         if let Some(folders) = vdf::get_obj(&doc, "libraryfolders") {
             for value in folders.values() {
-                if let Some(entry) = value.as_obj() {
-                    if let Some(path) = vdf::get_str(entry, "path") {
+                if let Some(entry) = value.as_obj()
+                    && let Some(path) = vdf::get_str(entry, "path") {
                         let path = PathBuf::from(path);
                         let key = library_key(&path);
                         if path.join("steamapps").is_dir() && !seen.contains(&key) {
@@ -94,7 +94,6 @@ pub fn libraries(root: &Path) -> Result<Vec<PathBuf>> {
                             libs.push(path);
                         }
                     }
-                }
             }
         }
     }
@@ -307,7 +306,7 @@ mod tests {
         fs::write(steamapps.join("common/Proton 11.0 (ARM64)/toolmanifest.vdf"), "\"manifest\" {}").unwrap();
         write_acf(&steamapps, 228980, "Steamworks Common Redistributables", "Steamworks Shared");
 
-        let games = installed_games(&[library.clone()]).unwrap();
+        let games = installed_games(std::slice::from_ref(&library)).unwrap();
         let ids: Vec<u64> = games.iter().map(|g| g.app_id).collect();
         assert_eq!(ids, vec![2140020]);
         fs::remove_dir_all(&library).unwrap();

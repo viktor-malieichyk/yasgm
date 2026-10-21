@@ -55,7 +55,9 @@ pub struct GameConfig {
 /// whichever provider is selected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ProviderConfig {
+    #[default]
     Onedrive,
     Local { path: PathBuf },
     /// Disconnected on purpose (`yasgm provider disconnect`): nothing syncs
@@ -64,11 +66,6 @@ pub enum ProviderConfig {
     None,
 }
 
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        ProviderConfig::Onedrive
-    }
-}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
