@@ -1640,8 +1640,22 @@ below; they're fixed one by one, in this order. Status inline.
     must be plain relative names (no `..`, root, drive, `:` or backslash),
     and a recorded wildcard value must be one plain segment.
 
-Remaining from the review, in order: 17 (desktop app: HTML injection,
-CSP, `open_path`), 7 (machine name without `hostname`), 10
+17. **Cloud text could inject markup into the desktop app — FIXED.** The
+    version row was built with `innerHTML` from `machine`/`os` (cloud
+    index, untrusted), with no CSP and generic `open_path`/`open_url`
+    commands reachable from page scripts → a crafted machine name could
+    open (run) any file. Now: the row is built from text nodes; CSP
+    `default-src 'self' ipc: http://ipc.localhost; img-src 'self' data:;
+    style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none';
+    form-action 'none'`; `open_path`/`open_url` and the three `get_*_location`
+    commands replaced by `open_save_location` / `open_backup_location`
+    (https links only) / `open_pending_location`, which look the location
+    up themselves; `opener:default` permission dropped (the page never
+    opens anything itself). Verified the app renders with the CSP (icons,
+    version rows, styles).
+
+Remaining from the review, in order: 7 (machine name without
+`hostname`), 10
 (conditional index writes), 11 (cloud read errors vs. "no saves"), 12
 (OneDrive retries, token renewal, lazy token so offline backups work
 after the token expires), 15 (corrupt config/state files), 18 (signed

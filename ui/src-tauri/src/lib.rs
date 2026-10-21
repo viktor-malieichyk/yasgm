@@ -142,49 +142,54 @@ async fn remove_version(app: AppHandle, app_id: u64, version_id: String) -> Resu
 
 // ---- open in Finder/Explorer -------------------------------------------
 
-/// Real local save directories for one game, from `yasgm paths <appid>`
-/// (only ones that actually exist on disk — see `paths_cmd` in main.rs).
-#[tauri::command]
-async fn get_save_paths(app: AppHandle, app_id: u64) -> Result<Vec<serde_json::Value>, String> {
-    let app_id = app_id.to_string();
-    let stdout = run_yasgm(&app, &["paths", &app_id]).await?;
+// The page asks to open a game's location; the path or URL is looked up
+// here, never taken from the page. With a generic "open this path" command,
+// injected markup could open (and so run) any file.
+
+fn json_out(stdout: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
 }
 
-/// Where this game's backups live on the *primary* provider (D8):
-/// `{"kind": "cloud", "url": "https://..."}` (OneDrive — a real Graph
-/// `webUrl` for the game's folder, or the app's OneDrive root if this game
-/// has no backups yet) or `{"kind": "local", "path": "..."}` (LocalFolder
-/// provider, directory created if missing); see `backup_location_cmd` in
-/// main.rs. Used by the GUI's "Open in cloud provider" button — distinct
-/// from `get_pending_location`, which is always local (D18's offline
-/// fallback store).
+/// Opens the game's first local save folder (`yasgm paths <appid>`: only
+/// ones that exist). `false` if it has none on this machine.
 #[tauri::command]
-async fn get_backup_location(app: AppHandle, app_id: u64) -> Result<serde_json::Value, String> {
-    let app_id = app_id.to_string();
-    let stdout = run_yasgm(&app, &["backup-location", &app_id]).await?;
-    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+async fn open_save_location(app: AppHandle, app_id: u64) -> Result<bool, String> {
+    let paths = json_out(&run_yasgm(&app, &["paths", &app_id.to_string()]).await?)?;
+    let Some(path) = paths.get(0).and_then(|p| p["path"].as_str()) else {
+        return Ok(false);
+    };
+    app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())?;
+    Ok(true)
 }
 
-/// `{"path": "..."}` — where any offline-pending (unsynced) backups for
-/// this game currently live (D18); see `pending_location_cmd` in main.rs.
-/// Always a real local path, regardless of which cloud provider is
-/// configured, since the pending store is a fixed fallback location.
+/// Opens where this game's backups live on the primary provider (D8): the
+/// OneDrive web page of its folder, or the local folder (`yasgm
+/// backup-location`). `false` if OneDrive gave no link.
 #[tauri::command]
-async fn get_pending_location(app: AppHandle, app_id: u64) -> Result<serde_json::Value, String> {
-    let app_id = app_id.to_string();
-    let stdout = run_yasgm(&app, &["pending-location", &app_id]).await?;
-    serde_json::from_str(stdout.trim()).map_err(|err| format!("parsing yasgm output: {err}"))
+async fn open_backup_location(app: AppHandle, app_id: u64) -> Result<bool, String> {
+    let loc = json_out(&run_yasgm(&app, &["backup-location", &app_id.to_string()]).await?)?;
+    if loc["kind"] == "cloud" {
+        let Some(url) = loc["url"].as_str() else {
+            return Ok(false);
+        };
+        if !url.starts_with("https://") {
+            return Err(format!("not opening an unexpected link: {url}"));
+        }
+        app.opener().open_url(url, None::<&str>).map_err(|err| err.to_string())?;
+    } else {
+        let path = loc["path"].as_str().ok_or("no folder in yasgm's answer")?;
+        app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())?;
+    }
+    Ok(true)
 }
 
+/// Opens the local folder holding this game's offline (pending) backups
+/// (D18; `yasgm pending-location`).
 #[tauri::command]
-fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+async fn open_pending_location(app: AppHandle, app_id: u64) -> Result<(), String> {
+    let loc = json_out(&run_yasgm(&app, &["pending-location", &app_id.to_string()]).await?)?;
+    let path = loc["path"].as_str().ok_or("no folder in yasgm's answer")?;
     app.opener().open_path(path, None::<&str>).map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn open_url(app: AppHandle, url: String) -> Result<(), String> {
-    app.opener().open_url(url, None::<&str>).map_err(|err| err.to_string())
 }
 
 /// Best-effort approximation of the user's real macOS accent color (System
@@ -486,11 +491,9 @@ pub fn run() {
             cloud_auth,
             get_autostart,
             set_autostart,
-            get_save_paths,
-            get_backup_location,
-            get_pending_location,
-            open_path,
-            open_url,
+            open_save_location,
+            open_backup_location,
+            open_pending_location,
             get_accent_color,
             app_version,
             check_update,

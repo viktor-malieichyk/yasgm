@@ -391,15 +391,8 @@ async function openSaveLocation() {
   if (selectedAppId === null) return;
   openLocationMsgEl.textContent = "looking for save location…";
   try {
-    const paths = await invoke("get_save_paths", { appId: selectedAppId });
-    if (paths.length === 0) {
-      openLocationMsgEl.textContent = "no save data found on this machine yet";
-      return;
-    }
-    // Most games resolve to a single root; if more than one, just open the
-    // first — the rest are still visible via `yasgm doctor`.
-    await invoke("open_path", { path: paths[0].path });
-    openLocationMsgEl.textContent = "";
+    const opened = await invoke("open_save_location", { appId: selectedAppId });
+    openLocationMsgEl.textContent = opened ? "" : "no save data found on this machine yet";
   } catch (err) {
     openLocationMsgEl.textContent = `couldn't open save location: ${err}`;
   }
@@ -412,17 +405,8 @@ async function openProviderLocation() {
   if (selectedAppId === null) return;
   openLocationMsgEl.textContent = "looking for cloud provider location…";
   try {
-    const loc = await invoke("get_backup_location", { appId: selectedAppId });
-    if (loc.kind === "cloud") {
-      if (!loc.url) {
-        openLocationMsgEl.textContent = "couldn't find a OneDrive link for this game";
-        return;
-      }
-      await invoke("open_url", { url: loc.url });
-    } else {
-      await invoke("open_path", { path: loc.path });
-    }
-    openLocationMsgEl.textContent = "";
+    const opened = await invoke("open_backup_location", { appId: selectedAppId });
+    openLocationMsgEl.textContent = opened ? "" : "couldn't find a OneDrive link for this game";
   } catch (err) {
     openLocationMsgEl.textContent = `couldn't open cloud provider location: ${err}`;
   }
@@ -434,8 +418,7 @@ async function openBackupsLocation() {
   if (selectedAppId === null) return;
   openLocationMsgEl.textContent = "looking for backups location…";
   try {
-    const loc = await invoke("get_pending_location", { appId: selectedAppId });
-    await invoke("open_path", { path: loc.path });
+    await invoke("open_pending_location", { appId: selectedAppId });
     openLocationMsgEl.textContent = "";
   } catch (err) {
     openLocationMsgEl.textContent = `couldn't open backups location: ${err}`;
@@ -499,17 +482,25 @@ function renderVersionRow(v) {
 
   const info = document.createElement("div");
   info.className = "version-info";
-  const badges = [
-    v.active && '<span class="badge active">active</span>',
-    v.pinned && '<span class="badge pinned">pinned</span>',
-    v.pending && '<span class="badge pending" title="Saved locally — not yet synced to the cloud">pending — offline</span>',
-  ]
-    .filter(Boolean)
-    .join(" ");
-  info.innerHTML = `
-    <div>${humanDate(v.created)} ${badges}</div>
-    <div class="muted">${v.machine} · ${v.os} · ${v.files} files · ${humanBytes(v.size)}</div>
-  `;
+  // Built from text nodes: machine names and the like come from the cloud
+  // index, which isn't trusted (anyone with access to that folder could
+  // put markup there).
+  const badge = (cls, text, title) => {
+    const el = document.createElement("span");
+    el.className = `badge ${cls}`;
+    el.textContent = text;
+    if (title) el.title = title;
+    return el;
+  };
+  const top = document.createElement("div");
+  top.append(humanDate(v.created));
+  if (v.active) top.append(" ", badge("active", "active"));
+  if (v.pinned) top.append(" ", badge("pinned", "pinned"));
+  if (v.pending) top.append(" ", badge("pending", "pending — offline", "Saved locally — not yet synced to the cloud"));
+  const details = document.createElement("div");
+  details.className = "muted";
+  details.textContent = `${v.machine} · ${v.os} · ${v.files} files · ${humanBytes(v.size)}`;
+  info.append(top, details);
   row.appendChild(info);
 
   const actions = document.createElement("div");
