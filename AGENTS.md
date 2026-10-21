@@ -23,11 +23,18 @@ Three shipped pieces share one Rust CLI, `yasgm`:
 
 ## Code map (`src/`)
 
-- `main.rs` — command dispatch and most commands (`sync`, `run`, `watch`,
-  `backup`, `versions`, `restore`, `config`, `games`, `status`, `pin`/`unpin`/`rm`,
-  `cloud-games`, `move-account`, `icons`, `doctor`, `manifest-gaps`, `selftest`…),
-  the watch loop, `DaemonState` (shared `Arc<Mutex>` so `status`/`events`
-  answer during a sync), `daemon_sync`, `run_sync`, `SyncEvent`/`EventLog`.
+- `main.rs` — module list and command dispatch only.
+- `commands/` — the CLI commands: `sync.rs` (`sync`, `backup`, `run`,
+  `run_sync`, `SyncEvent`), `setup.rs` (`auth`, `status`, `provider`,
+  `autostart`), `saves.rs` (`versions`, `restore`, `pin`/`unpin`/`rm`,
+  `cloud-games`, `move-account`, folder lookups), `games.rs` (`doctor`,
+  `manifest-gaps`, `config`/`games`, `icons`, `running`, `verify-update`),
+  `selftest.rs`.
+- `daemon.rs` — `yasgm watch`: watch loop, `GameSession`, `EventLog`,
+  shared `DaemonState` (so `status`/`events` answer during a sync), the
+  periodic cloud check, reload when games/settings change.
+- `ctx.rs` — `Ctx` (manifest + Steam library + account), `build_store`,
+  `load_indexes`; `args.rs` — argument helpers.
 - `sync.rs` — the per-game sync decision (three-state: local / last-synced /
   cloud → upload, download, conflict-keep-both, cloud-ahead for backup-only).
 - `store.rs` — cloud layout `accounts/<steam-account>/games/<appid>/{index.json,versions/*.zip}`,

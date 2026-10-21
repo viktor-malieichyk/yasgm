@@ -1732,7 +1732,13 @@ Code health (2026-10-21):
   future (versions are ordered by each device's clock).
 - `--` ends options for every command (`yasgm pin <app> -- <id>`).
 
-Remaining code health: split `main.rs`; clippy warnings
+- `main.rs` (2,700 lines) split, code moved unchanged: `main.rs` only
+  declares modules and dispatches; `args` (argument helpers), `ctx` (`Ctx`,
+  `build_store`, `load_indexes`), `daemon` (watch loop, game session,
+  event log, control-socket state, `watch status|start|stop|send`),
+  `commands/{sync,setup,saves,games,selftest}`. Tests moved with their code.
+
+Remaining code health: clippy warnings
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
 warning).

@@ -13,7 +13,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
-use crate::WatchCommand;
+use crate::daemon::WatchCommand;
 
 /// 32×32 generated dot icon — no bundled assets needed.
 fn icon() -> tray_icon::Icon {
@@ -42,7 +42,7 @@ pub fn tray_main(settle: Duration) -> Result<()> {
     let control_tx_loop = control_tx.clone();
     let (status_tx, status_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
-        if let Err(err) = crate::watch_loop(settle, (control_tx_loop, control_rx), Some(status_tx)) {
+        if let Err(err) = crate::daemon::watch_loop(settle, (control_tx_loop, control_rx), Some(status_tx)) {
             eprintln!("watch loop ended with error: {err:#}");
         }
         // Watch loop gone (Quit or error): the event loop below exits via
