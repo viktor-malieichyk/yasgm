@@ -36,6 +36,8 @@ use crate::snapshot::{Mount, Snapshot};
 
 pub const DEFAULT_KEEP: usize = 10;
 pub const SIZE_WARN_BYTES: u64 = 1_073_741_824; // 1 GB (D9)
+/// Warn when another version is dated this far (seconds) in the future.
+const CLOCK_SKEW_WARN: u64 = 300;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Index {
@@ -329,7 +331,11 @@ impl Store {
         // anything stranded from a previous offline run before adding to
         // it. Failure here just means we're still offline — proceed either
         // way, since the fallback path below covers that.
-        let _ = self.flush_pending(new.app_id, keep);
+        if let Err(err) = self.flush_pending(new.app_id, keep) {
+            if !crate::provider::is_offline(&err) {
+                eprintln!("{}: offline backups not uploaded yet ({err:#})", new.game);
+            }
+        }
 
         match self.push_raw_to(&*self.primary, new, keep, None) {
             Ok(version) => Ok(version),
@@ -388,6 +394,20 @@ impl Store {
             }
         };
 
+        // Versions are ordered by each device's clock; one that runs ahead
+        // makes its versions win (D5). Say so rather than fail silently.
+        if existing.is_none() {
+            if let Some(ahead) = current.iter().filter(|o| o.created > version.created + CLOCK_SKEW_WARN).max_by_key(|o| o.created) {
+                eprintln!(
+                    "warning: {}: a version from {} is dated {} min in the future — that device's clock (or this \
+                     one's) is wrong, which decides which saves count as newer",
+                    new.game,
+                    ahead.machine,
+                    (ahead.created - version.created) / 60
+                );
+            }
+        }
+
         let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
         provider.upload(&zip_rel, new.bytes)?;
         // Index first, then the pruned zips: a failure in between leaves
@@ -400,7 +420,9 @@ impl Store {
             Ok(Self::apply_retention(index, keep))
         })?;
         for id in &doomed {
-            let _ = provider.delete(&format!("{}/versions/{id}.zip", self.game_base(app_id)));
+            if let Err(err) = provider.delete(&format!("{}/versions/{id}.zip", self.game_base(app_id))) {
+                eprintln!("{}: couldn't delete old version {id} (no longer listed): {err:#}", new.game);
+            }
         }
 
         let total: u64 = index.versions.iter().map(|v| v.size).sum();
@@ -582,7 +604,9 @@ impl Store {
 
     /// Removes this account's (now empty) folder from the cloud, best effort.
     pub fn delete_account_folder(&self) {
-        let _ = self.primary.delete(&format!("accounts/{}", self.account));
+        if let Err(err) = self.primary.delete(&format!("accounts/{}", self.account)) {
+            eprintln!("couldn't remove the now-empty folder of account {}: {err:#}", self.account);
+        }
     }
 
     pub fn download_version(&self, app_id: u64, version: &Version) -> Result<Vec<u8>> {

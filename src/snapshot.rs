@@ -36,7 +36,6 @@ pub struct Snapshot {
     pub zip_path: PathBuf,
     pub content_hash: String,
     pub file_count: u64,
-    pub size: u64,
     pub mounts: Vec<Mount>,
     /// Newest file modification time (unix seconds): when the saves were
     /// last written. See `Version::saved_at`.
@@ -223,8 +222,7 @@ pub fn capture(
     zip.finish()?;
 
     let content_hash = format!("{:x}", hasher.finalize());
-    let size = fs::metadata(&zip_path)?.len();
-    Ok(Some(Snapshot { zip_path, content_hash, file_count, size, mounts, saved_at }))
+    Ok(Some(Snapshot { zip_path, content_hash, file_count, mounts, saved_at }))
 }
 
 /// Extract a snapshot zip onto this machine by re-resolving each mount's

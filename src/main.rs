@@ -169,11 +169,17 @@ fn light_store() -> Result<(String, Store)> {
 
 const VALUED_FLAGS: [&str; 7] = ["--version", "--mode", "--keep", "--app", "--settle", "--account", "--to"];
 
+/// Arguments that aren't options or option values. After `--` everything
+/// is positional (e.g. a version id that starts with dashes).
 fn positionals(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 1; // skip the command itself
     while i < args.len() {
         let arg = &args[i];
+        if arg == "--" {
+            out.extend(args[i + 1..].iter().cloned());
+            break;
+        }
         if VALUED_FLAGS.contains(&arg.as_str()) {
             i += 2;
             continue;
@@ -841,6 +847,11 @@ impl SyncEvent {
 }
 
 fn run_sync(ctx: &Ctx, only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
+    run_sync_as(ctx, only, dry_run, false)
+}
+
+/// `run_sync`; `backup_only` treats every game as backup-only (`backup`).
+fn run_sync_as(ctx: &Ctx, only: Option<u64>, dry_run: bool, all_backup_only: bool) -> Result<Vec<SyncEvent>> {
     // Waits for the daemon's (or another command's) sync; see lock.rs.
     let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
     let store = ctx.cloud_store()?;
@@ -857,6 +868,7 @@ fn run_sync(ctx: &Ctx, only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent
             println!("{}: skipped (mode off)", game.name);
             continue;
         };
+        let backup_only = backup_only || all_backup_only;
         let keep = cfg.game(game.app_id).keep.unwrap_or(store::DEFAULT_KEEP);
         let last = state.get(&ctx.account, game.app_id);
         let job = sync::Job { store: &store, files: &merged.files, game, os: ctx.os, backup_only, keep, dry_run };
@@ -1819,84 +1831,15 @@ fn running_cmd() -> Result<()> {
 
 // ---- backup / versions / restore -----------------------------------------
 
+/// `backup [appid]`: a sync that never downloads — every game is treated
+/// as backup-only (D2): local changes are uploaded, newer cloud saves are
+/// only reported, and in a conflict the local saves become active with the
+/// cloud's pinned.
 fn backup_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
-    // Waits for the daemon's (or another command's) sync; see lock.rs.
-    let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
-    let ctx = load_ctx()?;
-    let store = ctx.cloud_store()?;
-    let cfg = config::Config::load();
-    let mut state = config::State::load();
-
-    for game in ctx.games.iter().filter(|g| only.is_none_or(|id| id == g.app_id)) {
-        let Some(merged) = ctx.merged_game(game.app_id) else {
-            println!("{}: skipped (not in manifest)", game.name);
-            continue;
-        };
-        if cfg.game(game.app_id).mode == ModeOverride::Off {
-            println!("{}: skipped (mode off)", game.name);
-            continue;
-        }
-        let keep = cfg.game(game.app_id).keep.unwrap_or(store::DEFAULT_KEEP);
-        // Best-effort: catch up any pending (offline) backups before doing
-        // anything else — see the matching comment in sync::sync_game.
-        if !dry_run {
-            let _ = store.flush_pending(game.app_id, keep);
-        }
-        match snapshot::capture(&merged.files, game, ctx.os)? {
-            None => println!("{}: no save files on this machine", game.name),
-            Some(snap) => {
-                let index = store.load_index(game.app_id)?;
-                let head = index.as_ref().and_then(Store::head);
-                if head.map(|h| h.content_hash.as_str()) == Some(snap.content_hash.as_str()) {
-                    println!("{}: unchanged since last version", game.name);
-                    let head = head.expect("checked above");
-                    if !head.pending {
-                        state.set(&ctx.account, game.app_id, &head.id, &head.content_hash, None);
-                    }
-                    let _ = std::fs::remove_file(&snap.zip_path);
-                } else if dry_run {
-                    println!(
-                        "{}: would upload {} files ({})",
-                        game.name,
-                        snap.file_count,
-                        human_bytes(snap.size)
-                    );
-                    let _ = std::fs::remove_file(&snap.zip_path);
-                } else {
-                    match store.push(&game.name, game.app_id, &snap, ctx.os.name(), keep, false) {
-                        Ok(version) => {
-                            let verb = if version.pending { "backed up locally (pending — offline)" } else { "uploaded" };
-                            println!(
-                                "{}: {verb} version {} ({} files, {})",
-                                game.name,
-                                version.id,
-                                version.files,
-                                human_bytes(version.size)
-                            );
-                            if !version.pending {
-                                state.set(&ctx.account, game.app_id, &version.id, &version.content_hash, None);
-                            }
-                        }
-                        Err(e) if e.downcast_ref::<onedrive::QuotaExceeded>().is_some() => {
-                            eprintln!(
-                                "{}: OneDrive is out of storage space — stopping backup here. \
-                                 Free up space (or raise your plan), then run `yasgm backup` \
-                                 again to pick up where this left off.",
-                                game.name
-                            );
-                            break;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        }
-    }
-    if !dry_run {
-        state.save()?;
-    }
+    let failed = run_sync_as(&load_ctx()?, only, dry_run, true)?.iter().filter(|e| e.kind == "error").count();
+    ensure!(failed == 0, "{failed} game(s) failed to back up (see above)");
     Ok(())
 }
 

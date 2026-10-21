@@ -1716,7 +1716,23 @@ below; they're fixed one by one, in this order. Status inline.
     (stub `decky`) accepted the freshly signed plugin zip with the right
     hash and refused the same zip with one byte appended.
 
-Remaining from the review: code health
+Code health (2026-10-21):
+- `backup` is `run_sync_as(…, all_backup_only)` — a sync that never
+  downloads. The old separate loop also made local the active head even
+  when the cloud had moved on; now that's a conflict (local active, the
+  cloud's pinned) or "cloud ahead". `yasgm backup` exits non-zero if a game
+  failed.
+- No `too_many_arguments` exemptions left (`sync::Job`, `store::NewVersion`,
+  `extract` takes the `Version`).
+- Errors that were dropped silently are now logged where they can leave
+  something behind: a failed flush in `push_raw` (unless offline), a pruned
+  zip that couldn't be deleted, the emptied account folder after
+  `move-account`.
+- Clock skew: a push warns when another version is dated > 5 min in the
+  future (versions are ordered by each device's clock).
+- `--` ends options for every command (`yasgm pin <app> -- <id>`).
+
+Remaining code health: split `main.rs`; clippy warnings
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
 warning).
