@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -110,11 +110,42 @@ pub fn config_path() -> Option<PathBuf> {
 }
 
 fn load_json<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {
-    config_dir()
-        .ok()
-        .and_then(|dir| fs::read(dir.join(name)).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    match config_dir() {
+        Ok(dir) => load_json_from(&dir.join(name)),
+        Err(_) => T::default(),
+    }
+}
+
+/// A missing file means defaults. A damaged one (writes are atomic, so
+/// that's disk trouble or a hand edit) is moved aside — not silently read
+/// as empty and then overwritten on the next save — and reported.
+fn load_json_from<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> T {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(err) => {
+            eprintln!("warning: can't read {} ({err}); using defaults", path.display());
+            return T::default();
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".damaged-{secs}"));
+            let moved = fs::rename(path, &aside).is_ok();
+            eprintln!(
+                "warning: {} is damaged ({err}); {}using defaults",
+                path.display(),
+                if moved { format!("moved it to {} and ", Path::new(&aside).display()) } else { String::new() }
+            );
+            T::default()
+        }
+    }
 }
 
 fn save_json<T: Serialize>(name: &str, value: &T) -> Result<()> {
@@ -175,6 +206,21 @@ mod tests {
             let provider: ProviderConfig = serde_json::from_str(json).unwrap();
             assert_eq!(serde_json::to_string(&provider).unwrap(), json);
         }
+    }
+
+    #[test]
+    fn a_damaged_file_is_moved_aside_and_reported() {
+        let dir = std::env::temp_dir().join(format!("yasgm-config-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        assert!(load_json_from::<State>(&path).games.is_empty(), "missing → defaults");
+        fs::write(&path, b"{\"games\": {tru").unwrap();
+        assert!(load_json_from::<State>(&path).games.is_empty());
+        assert!(!path.exists(), "damaged file moved away");
+        let aside: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(aside.iter().any(|n| n.starts_with("state.json.damaged-")), "{aside:?}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

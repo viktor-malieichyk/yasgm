@@ -1687,7 +1687,12 @@ below; they're fixed one by one, in this order. Status inline.
     unchanged (`cloud-games` 6.6–7.2 s vs 6.9–8.5 s for the previous build
     on the same network).
 
-Remaining from the review, in order: 15 (corrupt config/state files), 18 (signed
+15. **Damaged config/state silently became defaults — FIXED.** A file
+    that doesn't parse is renamed to `<name>.damaged-<unix time>` and a
+    warning is printed (it used to be read as empty and overwritten by the
+    next save). Missing still means defaults; unreadable warns.
+
+Remaining from the review, in order: 18 (signed
 plugin updates), 19 (frozen game after a plugin crash), then code health
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
