@@ -11,7 +11,9 @@
 #   HOME="$T/b" YASGM_CLOUD_CHECK_SECS=5 "$Y" watch &   # a daemon on b
 #
 # T defaults to target/fm (short enough for the control socket's path).
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# bash sets BASH_SOURCE when sourcing; zsh sets $0 to the sourced file.
+repo="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+[[ -f "$repo/Cargo.toml" ]] || { echo "fake-machines.sh: can't find the repo" >&2; return 1; }
 T="${T:-$repo/target/fm}"
 Y="$repo/target/debug/yasgm"
 APP=999999990

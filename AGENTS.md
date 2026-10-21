@@ -116,27 +116,32 @@ plugin is still unverified.
 - Release builds of the desktop updater reject non-https feeds; test the
   updater with a `--debug` build of the *old* version.
 
-## Current state (2026-10-21) and what's next
+## Current state (2026-10-22) and what's next
 
-Done: v1.0 steps 1–5 and 8 (daemon lock, desktop auto-update on macOS, CLI
-JSON/control channel, Decky plugin + self-update + panel polish, README),
-plus cloud-only games, the signed-in account fix, `move-account`, the
-"Only with saves here" filter, sync phases and the per-operation lock.
+Done: v1.0 steps 1–5 and 8, plus the 2026-10-21 code review (DESIGN.md
+"Code review 2026-10-21": conflict rules, offline backups, per-game errors,
+periodic cloud check, conditional index writes, OneDrive retries, desktop
+CSP, signed plugin updates, `main.rs` split, clippy clean).
+
+Testing aids: `cargo test` (83 tests, incl. two-machine sync scenarios in
+`sync.rs`); `yasgm selftest` (real OneDrive round trip, cleans up);
+`scripts/fake-machines.sh` (fake HOMEs + made-up game + local-folder cloud
+for end-to-end runs, incl. daemons; `YASGM_CLOUD_CHECK_SECS` shortens the
+cloud check).
 
 Open:
-1. Owner installs the latest `dist/yasgm-decky-0.1.0.zip` on the Deck, then
-   run `yasgm move-account 1291627233` (no `--keep-source`) to finish moving
-   saves the Deck uploaded under the wrong Steam account into `57948699`
-   and delete the originals (a `--keep-source` copy already ran).
+1. Owner installs the latest signed `dist/yasgm-decky-0.1.0.zip` on the
+   Deck, then run `yasgm move-account 1291627233` (no `--keep-source`) to
+   finish moving saves uploaded under the wrong Steam account into
+   `57948699` and delete the originals.
 2. Step 6 — SteamOS validation in Gaming Mode (toasts, status card, icons,
-   progress bar, update/rollback, Proton paths, Windows↔Deck restore,
-   sleep mid-sync).
+   progress bar, update/rollback incl. signature check, frozen-game
+   recovery, machine name, Proton paths, Windows↔Deck restore, sleep
+   mid-sync).
 3. Step 7 — first release run (deferred by the owner; needs the secrets).
 4. Step 9 — macOS signing + notarization (needs the owner's Apple credentials).
 5. Windows verification on hardware (updater install, `taskkill` stop, locks).
-6. Follow-ups: delete stale local-only files after a download (DESIGN.md
-   "Deferred follow-ups"); add `cloud-games`/`move-account` to README's CLI list;
-   the tray "Open YASGM" click is untested.
+6. The tray "Open YASGM" click is untested.
 
 Post-1.0: Flathub GUI on SteamOS, Linux tray, more providers, GOG/Epic,
 Windows code signing.
