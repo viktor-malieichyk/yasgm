@@ -8,6 +8,12 @@
 //! dies, so a crash never leaves a stale lock behind — unlike a bare PID
 //! file. The PID goes into a separate sidecar file purely for messages:
 //! Windows file locks also block reads of the locked file itself.
+//!
+//! A second, short-lived lock (`sync.lock`) serializes the operations that
+//! change saves or the cloud — the daemon's syncs and one-shot `sync`,
+//! `run`, `backup`, `restore`, `pin`/`unpin`/`rm`, `move-account` from the
+//! CLI, GUI or Decky plugin — so they wait for each other instead of
+//! interleaving uploads, index rewrites and state.json writes.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -100,6 +106,42 @@ pub fn wait_until_running(timeout: std::time::Duration) -> Result<Option<Option<
     }
 }
 
+/// Held while one operation changes saves or the cloud; dropping it lets
+/// the next one in.
+pub struct OperationLock {
+    _file: File,
+}
+
+/// Takes the operation lock, waiting for whoever holds it (the daemon's
+/// sync, another command) to finish. Not reentrant: a process must not take
+/// it twice (flock locks belong to the open file, so a second open in the
+/// same process would wait on itself).
+pub fn acquire_operation() -> Result<OperationLock> {
+    acquire_operation_in(&lock_dir()?)
+}
+
+fn acquire_operation_in(dir: &Path) -> Result<OperationLock> {
+    let path = dir.join("sync.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            eprintln!("waiting for the sync already in progress to finish…");
+            crate::activity::set("waiting");
+            file.lock().with_context(|| format!("locking {}", path.display()))?;
+        }
+        Err(TryLockError::Error(err)) => {
+            return Err(err).with_context(|| format!("locking {}", path.display()));
+        }
+    }
+    Ok(OperationLock { _file: file })
+}
+
 fn acquire_in(dir: &Path) -> Result<DaemonLock> {
     let lock_path = dir.join("watch.lock");
     let pid_path = dir.join("watch.pid");
@@ -157,6 +199,31 @@ mod tests {
             again = acquire_in(&dir);
         }
         again.expect("lock is free again after drop");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn operation_lock_waits_for_the_holder() {
+        let dir = scratch_dir("operation");
+        let first = acquire_operation_in(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let lock = acquire_operation_in(&dir).unwrap();
+                tx.send(()).unwrap();
+                drop(lock);
+            })
+        };
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "second operation must wait while the first holds the lock"
+        );
+        drop(first);
+        // Generous: a child process forked by a parallel test may share the
+        // flock briefly (see above).
+        rx.recv_timeout(std::time::Duration::from_secs(5)).expect("second operation runs once the first is done");
+        waiter.join().unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

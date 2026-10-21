@@ -803,6 +803,8 @@ impl SyncEvent {
 }
 
 fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
+    // Waits for the daemon's (or another command's) sync; see lock.rs.
+    let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
     let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
     let cfg = config::Config::load();
@@ -1684,6 +1686,8 @@ fn running_cmd() -> Result<()> {
 fn backup_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
+    // Waits for the daemon's (or another command's) sync; see lock.rs.
+    let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
     let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
     let cfg = config::Config::load();
@@ -1936,6 +1940,8 @@ fn move_account_cmd(args: &[String]) -> Result<()> {
     };
     anyhow::ensure!(from != to, "both accounts are {to}");
     let dry_run = flag(args, "--dry-run");
+    // Waits for the daemon's (or another command's) sync; see lock.rs.
+    let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
     let cfg = config::Config::load();
     let (source, dest) = (build_store(from.clone(), &cfg)?, build_store(to.clone(), &cfg)?);
     let games = source.cloud_app_ids()?;
@@ -1962,6 +1968,8 @@ fn restore_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let app_id = parse_app_id(args)
         .context("usage: yasgm restore <appid> [--version <id>] [--dry-run]")?;
+    // Waits for the daemon's (or another command's) sync; see lock.rs.
+    let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
     let ctx = load_ctx()?;
     let game = ctx
         .games
@@ -2192,6 +2200,7 @@ fn pin_cmd(args: &[String], pinned: bool) -> Result<()> {
     ) else {
         anyhow::bail!("usage: yasgm {} <appid> <version-id>", if pinned { "pin" } else { "unpin" });
     };
+    let _op = lock::acquire_operation()?;
     let (_, store) = light_store()?;
     store.set_pinned(app_id, version_id, pinned)?;
     println!("{version_id}: pinned = {pinned}");
@@ -2206,6 +2215,7 @@ fn rm_cmd(args: &[String]) -> Result<()> {
     ) else {
         anyhow::bail!("usage: yasgm rm <appid> <version-id>");
     };
+    let _op = lock::acquire_operation()?;
     let (_, store) = light_store()?;
     store.remove_version(app_id, version_id)?;
     println!("deleted version {version_id}");

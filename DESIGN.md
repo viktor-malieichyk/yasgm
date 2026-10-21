@@ -1231,9 +1231,20 @@ and fast until the release is otherwise ready). Status is tracked inline.
    "lock frees after drop" unit test was flaky (~1 in 3) because other
    tests spawn processes in parallel — a child forked while the fd is open
    shares the flock until its exec closes it (O_CLOEXEC) — so the test
-   retries for up to 1 s. **Not covered**: a one-shot `sync`/`restore`
-   from the CLI or GUI can still run concurrently with the daemon's own
-   sync; a per-operation lock is a candidate follow-up.
+   retries for up to 1 s. **Per-operation lock (2026-10-21):** a second
+   lock, `<data dir>/yasgm/sync.lock`, serializes everything that changes
+   saves or the cloud — the daemon's syncs (`run_sync`, so also `run`'s
+   pre/post syncs and the Decky pre-launch sync) and one-shot `sync`,
+   `backup`, `restore`, `pin`/`unpin`/`rm`, `move-account` from the CLI,
+   GUI or plugin. Unlike the daemon lock it *waits* (blocking
+   flock/LockFileEx; prints "waiting for the sync already in progress to
+   finish…"; daemon `status` reports `sync_phase: "waiting"`, the Deck page
+   "Waiting for another sync…"). `--dry-run` skips it. Taken once per
+   process, never nested (a flock belongs to the open file, so a second
+   take in the same process would wait on itself). Index/state reads happen
+   after it's taken, so the second operation sees the first one's result.
+   Verified live: CLI sync blocked until another process released the lock;
+   a daemon sync queued during a CLI sync waited, then ran.
 2. **Desktop auto-update (D20)**: `tauri-plugin-updater` + Settings toggle
    + update banner + daemon stop/restart around install. **DONE on macOS
    2026-10-20; Windows unverified.** GUI (`ui/src-tauri/src/lib.rs`): `check_update`

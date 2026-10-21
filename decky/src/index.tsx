@@ -303,6 +303,7 @@ function useGameLists() {
 }
 
 const PHASE_TEXT: Record<string, string> = {
+  waiting: "Waiting for another sync…",
   checking: "Checking saves…",
   uploading: "Uploading saves…",
   downloading: "Downloading newer saves…",
