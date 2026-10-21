@@ -1660,10 +1660,34 @@ below; they're fixed one by one, in this order. Status inline.
    Deck will show up under its real name (usually `steamdeck`) from its next
    upload; older versions keep "machine". Not yet run on SteamOS.
 
-Remaining from the review, in order: 10
-(conditional index writes), 11 (cloud read errors vs. "no saves"), 12
-(OneDrive retries, token renewal, lazy token so offline backups work
-after the token expires), 15 (corrupt config/state files), 18 (signed
+10. **Two devices updating one index could drop a version — FIXED.**
+    `Provider` gained `download_tagged` / `upload_if` (write only if
+    unchanged since read; `None` = only if absent). OneDrive: the item's
+    `eTag` + `If-Match`, `conflictBehavior=fail` for creation (412/409 →
+    "changed"); others: compare a content hash, then write (narrows, can't
+    close, the window — fine for one machine, serialized by `sync.lock`).
+    Every index write goes through `Store::update_index`, which re-reads
+    and re-applies its change on a clash (5 tries): push, pin/unpin,
+    remove, import. Tested with a provider that lets "another machine"
+    write in between (both versions kept); `selftest` checks against real
+    OneDrive that a stale eTag and a create-over-existing are refused.
+11. **Cloud read errors looked like "no saves" — FIXED.** New
+    `provider::Offline` marks "couldn't reach the provider at all"
+    (transport errors after one retry; the sign-in service unreachable).
+    `load_index` and `locate` treat only that as "nothing in the cloud
+    right now"; a rejected request or a damaged index is an error (tested).
+    Pushes still fall back to the pending store on any failure.
+12. **No OneDrive retries; offline backups needed a fresh token — FIXED.**
+    `onedrive::Session` (replaces the free functions and
+    `ensure_access_token`): token fetched on first use, so building a
+    `Store` needs no network — an offline run with an expired token now
+    reaches the pending store instead of failing up front; a 401 renews it
+    once; 429/500/502/503/504 retried up to 4 tries, honouring
+    `Retry-After` (≤ 60 s, else 2/4/8 s); 507 → `QuotaExceeded`. Timing
+    unchanged (`cloud-games` 6.6–7.2 s vs 6.9–8.5 s for the previous build
+    on the same network).
+
+Remaining from the review, in order: 15 (corrupt config/state files), 18 (signed
 plugin updates), 19 (frozen game after a plugin crash), then code health
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew

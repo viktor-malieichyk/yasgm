@@ -141,8 +141,9 @@ fn load_indexes(store: &Store, ids: &[u64]) -> Vec<(u64, Result<Option<store::In
 fn build_store(account: String, cfg: &config::Config) -> Result<Store> {
     match &cfg.provider {
         config::ProviderConfig::Onedrive => {
-            let access_token = onedrive::ensure_access_token()?;
-            Store::new(Box::new(onedrive::OneDriveProvider::new(access_token)), account)
+            // Signed-in check only; the token itself is fetched on first use.
+            ensure!(onedrive::load_tokens().is_some(), "not signed in — run `yasgm auth` first");
+            Store::new(Box::new(onedrive::OneDriveProvider::new()), account)
         }
         config::ProviderConfig::Local { path } => {
             Store::new(Box::new(local::LocalFolderProvider::new(path.clone())), account)
@@ -533,7 +534,8 @@ fn auth(args: &[String]) -> Result<()> {
     onedrive::save_tokens(&tokens)?;
     connect_onedrive()?;
     println!("Sign-in successful; tokens cached.\n");
-    verify_cloud(&tokens.access_token)
+    println!("{}", cloud_summary()?);
+    Ok(())
 }
 
 /// Signing in is choosing OneDrive: a disconnected install becomes a
@@ -571,7 +573,7 @@ fn auth_device_json() -> Result<()> {
     .and_then(|tokens| {
         onedrive::save_tokens(&tokens)?;
         connect_onedrive()?;
-        cloud_summary(&tokens.access_token)
+        cloud_summary()
     });
     match result {
         Ok(detail) => {
@@ -585,17 +587,12 @@ fn auth_device_json() -> Result<()> {
     }
 }
 
-fn verify_cloud(access_token: &str) -> Result<()> {
-    println!("{}", cloud_summary(access_token)?);
-    Ok(())
-}
-
 /// One line describing the OneDrive app folder, proving the token works.
-fn cloud_summary(access_token: &str) -> Result<String> {
+fn cloud_summary() -> Result<String> {
     // Note: the AppFolder scope cannot read /me/drive (drive-wide metadata is
     // out of bounds — by design). The app folder itself is all we may touch;
     // the first request auto-creates it (Apps/YASGM).
-    let approot = onedrive::graph_get(access_token, "/me/drive/special/approot")?;
+    let approot = onedrive::Session::new().graph_get("/me/drive/special/approot")?;
     let name = approot["name"].as_str().unwrap_or("?");
     let parent = approot["parentReference"]["path"]
         .as_str()
@@ -647,7 +644,7 @@ fn status(args: &[String]) -> Result<()> {
 fn check_provider(provider: &config::ProviderConfig) -> Result<String> {
     match provider {
         config::ProviderConfig::None => anyhow::bail!(NOT_CONNECTED),
-        config::ProviderConfig::Onedrive => cloud_summary(&onedrive::ensure_access_token()?),
+        config::ProviderConfig::Onedrive => cloud_summary(),
         config::ProviderConfig::Local { path } => {
             let meta = std::fs::metadata(&path)
                 .with_context(|| format!("{} not accessible", path.display()))?;
@@ -770,16 +767,16 @@ fn backup_location_cmd(args: &[String]) -> Result<()> {
     let account = steam::current_account(&root).context("no Steam account found in userdata")?;
     let json = match &cfg.provider {
         config::ProviderConfig::Onedrive => {
-            let access_token = onedrive::ensure_access_token()?;
+            let session = onedrive::Session::new();
             let rel = format!("accounts/{account}/games/{app_id}");
-            let web_url = onedrive::item_get(&access_token, &rel)?
+            let web_url = session.item_get(&rel)?
                 .and_then(|item| item["webUrl"].as_str().map(str::to_owned));
             // No backups made yet for this game: fall back to the app's
             // OneDrive root folder (always exists — Graph auto-creates it)
             // rather than a dead end.
             let web_url = match web_url {
                 Some(url) => Some(url),
-                None => onedrive::graph_get(&access_token, "/me/drive/special/approot")?
+                None => session.graph_get("/me/drive/special/approot")?
                     ["webUrl"]
                     .as_str()
                     .map(str::to_owned),
@@ -2394,9 +2391,8 @@ fn selftest() -> Result<()> {
         manifest::FileRule { tags: vec!["save".to_owned()], when: Vec::new() },
     );
 
-    let access_token = onedrive::ensure_access_token()?;
     let store = Store::new(
-        Box::new(onedrive::OneDriveProvider::new(access_token.clone())),
+        Box::new(onedrive::OneDriveProvider::new()),
         "selftest".to_owned(),
     )?;
 
@@ -2471,7 +2467,15 @@ fn selftest() -> Result<()> {
         "expected Downloaded/InSync after cloud moved, got {outcome:?}"
     );
 
-    onedrive::delete(&access_token, "accounts/selftest")?;
+    println!("   conditional index write…");
+    let session = onedrive::Session::new();
+    let rel = format!("accounts/selftest/games/{}/index.json", game.app_id);
+    let (bytes, tag) = session.download_tagged(&rel)?.context("index missing")?;
+    ensure!(session.upload_if(&rel, &bytes, Some(&tag))?, "write with the current eTag was refused");
+    ensure!(!session.upload_if(&rel, &bytes, Some(&tag))?, "write with a stale eTag was accepted");
+    ensure!(!session.upload_if(&rel, &bytes, None)?, "create-only write over an existing file was accepted");
+
+    session.delete("accounts/selftest")?;
     let _ = std::fs::remove_dir_all(&tmp);
     println!("selftest passed ✔ (cloud + local artifacts cleaned up)");
     Ok(())

@@ -116,7 +116,7 @@ fn token_request(params: &[(&str, &str)]) -> Result<std::result::Result<TokenRes
                 .to_owned();
             return Ok(Err(code));
         }
-        Err(err) => return Err(err).context("token endpoint unreachable"),
+        Err(err) => return Err(crate::provider::Offline(format!("Microsoft sign-in service: {err}")).into()),
     };
     Ok(Ok(serde_json::from_str(&body).context("parsing token response")?))
 }
@@ -343,102 +343,15 @@ pub fn refresh(tokens: Tokens) -> Result<Tokens> {
 }
 
 /// Valid access token from the cache, refreshing if expired.
-pub fn ensure_access_token() -> Result<String> {
-    let tokens = load_tokens().context("not signed in — run `yasgm auth` first")?;
-    if tokens.expires_at > unix_now() {
-        return Ok(tokens.access_token);
-    }
-    Ok(refresh(tokens)?.access_token)
-}
-
-pub fn graph_get(access_token: &str, path: &str) -> Result<serde_json::Value> {
-    match agent().get(&format!("{GRAPH}{path}"))
-        .set("Authorization", &format!("Bearer {access_token}"))
-        .call()
-    {
-        Ok(resp) => Ok(serde_json::from_str(&resp.into_string()?)?),
-        Err(ureq::Error::Status(code, resp)) => {
-            bail!("Graph {path} failed ({code}): {}", resp.into_string().unwrap_or_default())
-        }
-        Err(err) => Err(err).context("Graph unreachable"),
-    }
-}
-
-// ---- App-folder file operations ------------------------------------------
-// `rel` is a path relative to the app folder, no leading slash.
-
 fn approot_url(rel: &str, suffix: &str) -> String {
     format!("{GRAPH}/me/drive/special/approot:/{rel}{suffix}")
-}
-
-fn bearer(access_token: &str) -> String {
-    format!("Bearer {access_token}")
-}
-
-/// Item metadata, or None if the path doesn't exist.
-pub fn item_get(access_token: &str, rel: &str) -> Result<Option<serde_json::Value>> {
-    match agent().get(&approot_url(rel, ""))
-        .set("Authorization", &bearer(access_token))
-        .call()
-    {
-        Ok(resp) => Ok(Some(serde_json::from_str(&resp.into_string()?)?)),
-        Err(ureq::Error::Status(404, _)) => Ok(None),
-        Err(ureq::Error::Status(code, resp)) => {
-            bail!("Graph get {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
-        }
-        Err(err) => Err(err).context("Graph unreachable"),
-    }
-}
-
-/// Names of a folder's children (all pages); empty if it doesn't exist.
-pub fn list_children(access_token: &str, rel: &str) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    let mut url = approot_url(rel, ":/children?$select=name&$top=999");
-    loop {
-        let page: serde_json::Value = match agent().get(&url).set("Authorization", &bearer(access_token)).call() {
-            Ok(resp) => serde_json::from_str(&resp.into_string()?)?,
-            Err(ureq::Error::Status(404, _)) => return Ok(names),
-            Err(ureq::Error::Status(code, resp)) => {
-                bail!("Graph list {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
-            }
-            Err(err) => return Err(err).context("Graph unreachable"),
-        };
-        if let Some(items) = page["value"].as_array() {
-            names.extend(items.iter().filter_map(|i| i["name"].as_str().map(str::to_owned)));
-        }
-        match page["@odata.nextLink"].as_str() {
-            Some(next) => url = next.to_owned(),
-            None => return Ok(names),
-        }
-    }
-}
-
-pub fn download(access_token: &str, rel: &str) -> Result<Vec<u8>> {
-    download_if_exists(access_token, rel)?.with_context(|| format!("{rel} not found in cloud"))
-}
-
-/// The file's bytes, or None if it doesn't exist (one lookup fewer than
-/// `item_get` + `download`).
-pub fn download_if_exists(access_token: &str, rel: &str) -> Result<Option<Vec<u8>>> {
-    let Some(item) = item_get(access_token, rel)? else {
-        return Ok(None);
-    };
-    // The pre-authorized download URL avoids auth-header issues on the CDN
-    // redirect target.
-    let url = item["@microsoft.graph.downloadUrl"]
-        .as_str()
-        .with_context(|| format!("no download URL for {rel}"))?;
-    let resp = agent().get(url).call().context("downloading content")?;
-    let mut bytes = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .context("reading download stream")?;
-    Ok(Some(bytes))
 }
 
 const SIMPLE_UPLOAD_LIMIT: usize = 4_000_000;
 // Graph requires chunk sizes in multiples of 320 KiB; 10 MiB qualifies.
 const CHUNK: usize = 10_485_760;
+/// Tries per request when Graph is throttling (429) or failing (5xx).
+const ATTEMPTS: u32 = 4;
 
 /// The AppFolder scope can't read `/me/drive` for proactive quota checks (see
 /// DESIGN.md's Azure appendix), so quota exhaustion is only detectable from a
@@ -457,108 +370,250 @@ impl std::fmt::Display for QuotaExceeded {
 
 impl std::error::Error for QuotaExceeded {}
 
-pub fn upload(access_token: &str, rel: &str, bytes: &[u8]) -> Result<()> {
-    if bytes.len() <= SIMPLE_UPLOAD_LIMIT {
-        return match agent().put(&approot_url(rel, ":/content"))
-            .set("Authorization", &bearer(access_token))
-            .set("Content-Type", "application/octet-stream")
-            .send_bytes(bytes)
-        {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(507, _)) => Err(QuotaExceeded.into()),
-            Err(ureq::Error::Status(code, resp)) => {
-                bail!("upload {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
+/// How Graph answered a request that didn't fail outright.
+enum Reply {
+    Ok(ureq::Response),
+    NotFound,
+    /// 412/409: a conditional request found the item changed (or present).
+    Changed,
+}
+
+/// Graph access for one run. The access token is fetched on first use —
+/// so a run that's offline with an expired token still gets as far as the
+/// pending store (D18) instead of failing up front — and renewed once if
+/// Graph rejects it (401: expired mid-run, revoked). Throttling (429) and
+/// server errors (5xx) are retried, honouring `Retry-After`; a request that
+/// can't reach Microsoft at all is reported as `provider::Offline`.
+pub struct Session {
+    token: std::sync::Mutex<Option<String>>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session::new()
+    }
+}
+
+impl Session {
+    pub fn new() -> Session {
+        Session { token: std::sync::Mutex::new(None) }
+    }
+
+    fn token(&self, renew: bool) -> Result<String> {
+        let mut cached = self.token.lock().unwrap_or_else(|p| p.into_inner());
+        if renew || cached.is_none() {
+            let tokens = load_tokens().context("not signed in — run `yasgm auth` first")?;
+            let tokens = if renew || tokens.expires_at <= unix_now() { refresh(tokens)? } else { tokens };
+            *cached = Some(tokens.access_token);
+        }
+        Ok(cached.clone().expect("set above"))
+    }
+
+    /// Sends the request `make` builds (given the bearer header, for Graph
+    /// calls; `authed: false` for pre-authorized URLs) with the retries above.
+    fn send(&self, what: &str, authed: bool, make: impl Fn(Option<&str>) -> Result<ureq::Response, ureq::Error>) -> Result<Reply> {
+        let mut renewed = false;
+        for attempt in 1..=ATTEMPTS {
+            let bearer = if authed { Some(format!("Bearer {}", self.token(false)?)) } else { None };
+            match make(bearer.as_deref()) {
+                Ok(resp) => return Ok(Reply::Ok(resp)),
+                Err(ureq::Error::Status(404, _)) => return Ok(Reply::NotFound),
+                Err(ureq::Error::Status(409 | 412, _)) => return Ok(Reply::Changed),
+                Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
+                Err(ureq::Error::Status(401, _)) if authed && !renewed => {
+                    renewed = true;
+                    self.token(true)?;
+                }
+                Err(ureq::Error::Status(code @ (429 | 500 | 502 | 503 | 504), resp)) if attempt < ATTEMPTS => {
+                    let wait = resp.header("Retry-After").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(1 << attempt);
+                    eprintln!("OneDrive answered {code} to {what}; retrying in {}s", wait.min(60));
+                    sleep(Duration::from_secs(wait.min(60)));
+                }
+                Err(ureq::Error::Status(code, resp)) => {
+                    bail!("{what} failed ({code}): {}", resp.into_string().unwrap_or_default())
+                }
+                Err(ureq::Error::Transport(err)) if attempt < 2 => {
+                    let _ = err;
+                    sleep(Duration::from_secs(2));
+                }
+                Err(ureq::Error::Transport(err)) => {
+                    return Err(crate::provider::Offline(format!("{what}: {err}")).into());
+                }
             }
-            Err(err) => Err(err).context("Graph unreachable"),
+        }
+        bail!("{what}: OneDrive kept refusing (throttled or failing); try again later")
+    }
+
+    fn ok(&self, what: &str, authed: bool, make: impl Fn(Option<&str>) -> Result<ureq::Response, ureq::Error>) -> Result<Option<ureq::Response>> {
+        match self.send(what, authed, make)? {
+            Reply::Ok(resp) => Ok(Some(resp)),
+            Reply::NotFound => Ok(None),
+            Reply::Changed => bail!("{what}: unexpected conflict"),
+        }
+    }
+
+    pub fn graph_get(&self, path: &str) -> Result<serde_json::Value> {
+        let what = format!("Graph {path}");
+        let resp = self
+            .ok(&what, true, |auth| agent().get(&format!("{GRAPH}{path}")).set("Authorization", auth.unwrap_or_default()).call())?
+            .with_context(|| format!("{what}: not found"))?;
+        Ok(serde_json::from_str(&resp.into_string()?)?)
+    }
+
+    pub fn item_get(&self, rel: &str) -> Result<Option<serde_json::Value>> {
+        match self.ok(&format!("get {rel}"), true, |auth| agent().get(&approot_url(rel, "")).set("Authorization", auth.unwrap_or_default()).call())? {
+            Some(resp) => Ok(Some(serde_json::from_str(&resp.into_string()?)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_children(&self, rel: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        let mut url = approot_url(rel, ":/children?$select=name&$top=999");
+        loop {
+            let Some(resp) = self.ok(&format!("list {rel}"), true, |auth| agent().get(&url).set("Authorization", auth.unwrap_or_default()).call())? else {
+                return Ok(names);
+            };
+            let page: serde_json::Value = serde_json::from_str(&resp.into_string()?)?;
+            if let Some(items) = page["value"].as_array() {
+                names.extend(items.iter().filter_map(|i| i["name"].as_str().map(str::to_owned)));
+            }
+            match page["@odata.nextLink"].as_str() {
+                Some(next) => url = next.to_owned(),
+                None => return Ok(names),
+            }
+        }
+    }
+
+    /// The file's bytes and eTag, or None if it doesn't exist.
+    pub fn download_tagged(&self, rel: &str) -> Result<Option<(Vec<u8>, String)>> {
+        let Some(item) = self.item_get(rel)? else {
+            return Ok(None);
         };
+        // The pre-authorized download URL avoids auth-header issues on the
+        // CDN redirect target.
+        let url = item["@microsoft.graph.downloadUrl"].as_str().with_context(|| format!("no download URL for {rel}"))?;
+        let resp = self
+            .ok(&format!("download {rel}"), false, |_| agent().get(url).call())?
+            .with_context(|| format!("{rel} vanished while downloading"))?;
+        let mut bytes = Vec::new();
+        resp.into_reader().read_to_end(&mut bytes).context("reading download stream")?;
+        Ok(Some((bytes, item["eTag"].as_str().unwrap_or_default().to_owned())))
     }
 
-    // Large upload: resumable session, chunked.
-    let session_body = r#"{"item":{"@microsoft.graph.conflictBehavior":"replace"}}"#;
-    let session: serde_json::Value = match agent().post(&approot_url(rel, ":/createUploadSession"))
-        .set("Authorization", &bearer(access_token))
-        .set("Content-Type", "application/json")
-        .send_string(session_body)
-    {
-        Ok(resp) => serde_json::from_str(&resp.into_string()?)?,
-        Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
-        Err(ureq::Error::Status(code, resp)) => {
-            bail!("upload session for {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
+    pub fn upload(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() <= SIMPLE_UPLOAD_LIMIT {
+            self.ok(&format!("upload {rel}"), true, |auth| {
+                agent()
+                    .put(&approot_url(rel, ":/content"))
+                    .set("Authorization", auth.unwrap_or_default())
+                    .set("Content-Type", "application/octet-stream")
+                    .send_bytes(bytes)
+            })?;
+            return Ok(());
         }
-        Err(err) => return Err(err).context("Graph unreachable"),
-    };
-    let upload_url = session["uploadUrl"]
-        .as_str()
-        .context("upload session missing uploadUrl")?;
 
-    let total = bytes.len();
-    let mut offset = 0;
-    while offset < total {
-        let end = (offset + CHUNK).min(total);
-        let range = format!("bytes {}-{}/{}", offset, end - 1, total);
-        match agent().put(upload_url)
-            .set("Content-Range", &range)
-            .send_bytes(&bytes[offset..end])
-        {
-            Ok(_) => {}
-            Err(ureq::Error::Status(507, _)) => return Err(QuotaExceeded.into()),
-            Err(ureq::Error::Status(code, resp)) => {
-                bail!("chunk {range} of {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
+        // Large upload: resumable session, chunked.
+        let session_body = r#"{"item":{"@microsoft.graph.conflictBehavior":"replace"}}"#;
+        let session: serde_json::Value = match self.ok(&format!("upload session for {rel}"), true, |auth| {
+            agent()
+                .post(&approot_url(rel, ":/createUploadSession"))
+                .set("Authorization", auth.unwrap_or_default())
+                .set("Content-Type", "application/json")
+                .send_string(session_body)
+        })? {
+            Some(resp) => serde_json::from_str(&resp.into_string()?)?,
+            None => bail!("upload session for {rel}: not found"),
+        };
+        let upload_url = session["uploadUrl"].as_str().context("upload session missing uploadUrl")?;
+
+        let total = bytes.len();
+        let mut offset = 0;
+        while offset < total {
+            let end = (offset + CHUNK).min(total);
+            let range = format!("bytes {}-{}/{}", offset, end - 1, total);
+            self.ok(&format!("chunk {range} of {rel}"), false, |_| {
+                agent().put(upload_url).set("Content-Range", &range).send_bytes(&bytes[offset..end])
+            })?;
+            offset = end;
+        }
+        Ok(())
+    }
+
+    /// Small files only (indexes): replaces `rel` only if its eTag is still
+    /// `expected`, or creates it only if it doesn't exist (`None`).
+    pub fn upload_if(&self, rel: &str, bytes: &[u8], expected: Option<&str>) -> Result<bool> {
+        anyhow::ensure!(bytes.len() <= SIMPLE_UPLOAD_LIMIT, "{rel} is too large for a conditional upload");
+        let url = match expected {
+            Some(_) => approot_url(rel, ":/content"),
+            None => approot_url(rel, ":/content?@microsoft.graph.conflictBehavior=fail"),
+        };
+        let reply = self.send(&format!("upload {rel}"), true, |auth| {
+            let mut request = agent()
+                .put(&url)
+                .set("Authorization", auth.unwrap_or_default())
+                .set("Content-Type", "application/octet-stream");
+            if let Some(tag) = expected {
+                request = request.set("If-Match", tag);
             }
-            Err(err) => return Err(err).context("Graph unreachable during chunk upload"),
+            request.send_bytes(bytes)
+        })?;
+        match reply {
+            Reply::Ok(_) => Ok(true),
+            Reply::Changed => Ok(false),
+            Reply::NotFound => bail!("upload {rel}: not found"),
         }
-        offset = end;
     }
-    Ok(())
-}
 
-pub fn delete(access_token: &str, rel: &str) -> Result<()> {
-    match agent().delete(&approot_url(rel, ""))
-        .set("Authorization", &bearer(access_token))
-        .call()
-    {
-        Ok(_) | Err(ureq::Error::Status(404, _)) => Ok(()),
-        Err(ureq::Error::Status(code, resp)) => {
-            bail!("delete {rel} failed ({code}): {}", resp.into_string().unwrap_or_default())
-        }
-        Err(err) => Err(err).context("Graph unreachable"),
+    pub fn delete(&self, rel: &str) -> Result<()> {
+        self.ok(&format!("delete {rel}"), true, |auth| agent().delete(&approot_url(rel, "")).set("Authorization", auth.unwrap_or_default()).call())?;
+        Ok(())
     }
 }
 
-/// Adapts the free functions above to the `Provider` trait so `Store` can
-/// treat OneDrive and LocalFolder interchangeably (D8).
+/// Adapts `Session` to the `Provider` trait so `Store` can treat OneDrive
+/// and LocalFolder interchangeably (D8).
+#[derive(Default)]
 pub struct OneDriveProvider {
-    access_token: String,
+    session: Session,
 }
 
 impl OneDriveProvider {
-    pub fn new(access_token: String) -> OneDriveProvider {
-        OneDriveProvider { access_token }
+    pub fn new() -> OneDriveProvider {
+        OneDriveProvider { session: Session::new() }
     }
 }
 
 impl crate::provider::Provider for OneDriveProvider {
     fn exists(&self, rel: &str) -> Result<bool> {
-        Ok(item_get(&self.access_token, rel)?.is_some())
+        Ok(self.session.item_get(rel)?.is_some())
     }
 
     fn download(&self, rel: &str) -> Result<Vec<u8>> {
-        download(&self.access_token, rel)
+        self.download_if_exists(rel)?.with_context(|| format!("{rel} not found in cloud"))
     }
 
     fn upload(&self, rel: &str, bytes: &[u8]) -> Result<()> {
-        upload(&self.access_token, rel, bytes)
+        self.session.upload(rel, bytes)
     }
 
     fn delete(&self, rel: &str) -> Result<()> {
-        delete(&self.access_token, rel)
+        self.session.delete(rel)
     }
 
     fn list(&self, rel: &str) -> Result<Vec<String>> {
-        list_children(&self.access_token, rel)
+        self.session.list_children(rel)
     }
 
     fn download_if_exists(&self, rel: &str) -> Result<Option<Vec<u8>>> {
-        download_if_exists(&self.access_token, rel)
+        Ok(self.session.download_tagged(rel)?.map(|(bytes, _)| bytes))
+    }
+
+    fn download_tagged(&self, rel: &str) -> Result<Option<(Vec<u8>, String)>> {
+        self.session.download_tagged(rel)
+    }
+
+    fn upload_if(&self, rel: &str, bytes: &[u8], expected: Option<&str>) -> Result<bool> {
+        self.session.upload_if(rel, bytes, expected)
     }
 }

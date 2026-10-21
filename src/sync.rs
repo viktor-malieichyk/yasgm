@@ -303,19 +303,19 @@ mod tests {
     struct Offline;
     impl crate::provider::Provider for Offline {
         fn exists(&self, _: &str) -> Result<bool> {
-            anyhow::bail!("offline")
+            Err(crate::provider::Offline("test".into()).into())
         }
         fn download(&self, _: &str) -> Result<Vec<u8>> {
-            anyhow::bail!("offline")
+            Err(crate::provider::Offline("test".into()).into())
         }
         fn upload(&self, _: &str, _: &[u8]) -> Result<()> {
-            anyhow::bail!("offline")
+            Err(crate::provider::Offline("test".into()).into())
         }
         fn delete(&self, _: &str) -> Result<()> {
-            anyhow::bail!("offline")
+            Err(crate::provider::Offline("test".into()).into())
         }
         fn list(&self, _: &str) -> Result<Vec<String>> {
-            anyhow::bail!("offline")
+            Err(crate::provider::Offline("test".into()).into())
         }
     }
 

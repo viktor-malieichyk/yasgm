@@ -174,17 +174,46 @@ impl Store {
         format!("accounts/{}/games/{}", self.account, app_id)
     }
 
+    fn index_rel(&self, app_id: u64) -> String {
+        format!("{}/index.json", self.game_base(app_id))
+    }
+
     fn load_index_from(&self, provider: &dyn Provider, app_id: u64) -> Result<Option<Index>> {
-        let rel = format!("{}/index.json", self.game_base(app_id));
-        match provider.download_if_exists(&rel)? {
-            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes).context("parsing index.json")?)),
+        Ok(self.load_index_tagged(provider, app_id)?.map(|(index, _)| index))
+    }
+
+    fn load_index_tagged(&self, provider: &dyn Provider, app_id: u64) -> Result<Option<(Index, String)>> {
+        match provider.download_tagged(&self.index_rel(app_id))? {
+            Some((bytes, tag)) => Ok(Some((serde_json::from_slice(&bytes).context("parsing index.json")?, tag))),
             None => Ok(None),
         }
     }
 
-    fn save_index_to(&self, provider: &dyn Provider, index: &Index) -> Result<()> {
-        let rel = format!("{}/index.json", self.game_base(index.app_id));
-        provider.upload(&rel, &serde_json::to_vec_pretty(index)?)
+    /// Read-modify-write of one game's index on `provider`. Another machine
+    /// may write the same index in between (two devices syncing a game at
+    /// once); the write is conditional, and on a clash this re-reads and
+    /// re-applies `change` to the newer index — so `change` must be
+    /// repeatable. A game without an index starts from an empty one.
+    fn update_index<T>(
+        &self,
+        provider: &dyn Provider,
+        app_id: u64,
+        game: &str,
+        mut change: impl FnMut(&mut Index) -> Result<T>,
+    ) -> Result<(T, Index)> {
+        const ATTEMPTS: u64 = 5;
+        for attempt in 1..=ATTEMPTS {
+            let (mut index, tag) = match self.load_index_tagged(provider, app_id)? {
+                Some((index, tag)) => (index, Some(tag)),
+                None => (Index { schema: 1, game: game.to_owned(), app_id, versions: Vec::new() }, None),
+            };
+            let out = change(&mut index)?;
+            if provider.upload_if(&self.index_rel(app_id), &serde_json::to_vec_pretty(&index)?, tag.as_deref())? {
+                return Ok((out, index));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150 * attempt));
+        }
+        anyhow::bail!("{game}: its version list kept changing on another device — try again")
     }
 
     /// Steam accounts with a folder in the cloud, besides this store's one,
@@ -222,11 +251,16 @@ impl Store {
     /// (offline-fallback) versions, so callers never need to know which
     /// provider a version actually lives on.
     pub fn load_index(&self, app_id: u64) -> Result<Option<Index>> {
-        // An unreachable primary shouldn't hide pending versions — treat it
-        // as "nothing from primary right now" rather than a hard error. A
-        // broken *local* pending store is a real problem, so that error
-        // still propagates.
-        let primary = self.load_index_from(&*self.primary, app_id).unwrap_or(None);
+        // An unreachable primary shouldn't hide pending versions — offline
+        // counts as "nothing from primary right now". Any other failure (a
+        // rejected request, a damaged index) is reported: treating it as
+        // "no saves in the cloud" would show empty version lists and send
+        // sync down its first-upload path.
+        let primary = match self.load_index_from(&*self.primary, app_id) {
+            Ok(index) => index,
+            Err(err) if crate::provider::is_offline(&err) => None,
+            Err(err) => return Err(err),
+        };
         let pending = self.load_index_from(&*self.pending, app_id)?;
         Ok(match (primary, pending) {
             (None, None) => None,
@@ -320,33 +354,26 @@ impl Store {
     /// like the newest version.
     fn push_raw_to(&self, provider: &dyn Provider, new: &NewVersion, keep: usize, existing: Option<&Version>) -> Result<Version> {
         let app_id = new.app_id;
-        let mut index = self.load_index_from(provider, app_id)?.unwrap_or(Index {
-            schema: 1,
-            game: new.game.to_owned(),
-            app_id,
-            versions: Vec::new(),
-        });
+        let current = self.load_index_from(provider, app_id)?.map(|i| i.versions).unwrap_or_default();
+        let unique = |mut id: String| {
+            while current.iter().any(|o| o.id == id) {
+                id.push('x'); // same machine, same second — keep ids unique
+            }
+            id
+        };
         let version = match existing {
             Some(v) => {
                 // Already there: an earlier flush stored it but stopped
                 // before clearing it from the pending store.
-                if index.versions.iter().any(|o| o.id == v.id && o.content_hash == v.content_hash) {
+                if current.iter().any(|o| o.id == v.id && o.content_hash == v.content_hash) {
                     return Ok(Version { pending: false, ..v.clone() });
                 }
-                let mut id = v.id.clone();
-                while index.versions.iter().any(|o| o.id == id) {
-                    id.push('x'); // another version got this id meanwhile
-                }
-                Version { id, pending: false, ..v.clone() }
+                Version { id: unique(v.id.clone()), pending: false, ..v.clone() }
             }
             None => {
                 let created = unix_now();
-                let mut id = format!("{}_{}", timestamp_id(created), machine_name());
-                while index.versions.iter().any(|v| v.id == id) {
-                    id.push('x'); // same machine, same second — keep ids unique
-                }
                 Version {
-                    id,
+                    id: unique(format!("{}_{}", timestamp_id(created), machine_name())),
                     created,
                     machine: machine_name(),
                     os: new.os.to_owned(),
@@ -360,13 +387,18 @@ impl Store {
                 }
             }
         };
+
         let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
         provider.upload(&zip_rel, new.bytes)?;
-        index.versions.push(version.clone());
         // Index first, then the pruned zips: a failure in between leaves
         // unreferenced zips, never index entries without their zip.
-        let doomed = Self::apply_retention(&mut index, keep);
-        self.save_index_to(provider, &index)?;
+        let (doomed, index) = self.update_index(provider, app_id, new.game, |index| {
+            if index.versions.iter().any(|v| v.id == version.id) {
+                anyhow::bail!("version id {} was taken meanwhile", version.id);
+            }
+            index.versions.push(version.clone());
+            Ok(Self::apply_retention(index, keep))
+        })?;
         for id in &doomed {
             let _ = provider.delete(&format!("{}/versions/{id}.zip", self.game_base(app_id)));
         }
@@ -394,7 +426,7 @@ impl Store {
         let Some(mut pending_index) = self.load_index_from(&*self.pending, app_id)? else {
             return Ok(Vec::new());
         };
-        let index_rel = format!("{}/index.json", self.game_base(app_id));
+        let index_rel = self.index_rel(app_id);
         let mut flushed = Vec::new();
         while let Some(version) = pending_index.versions.first().cloned() {
             let zip_rel = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
@@ -417,7 +449,7 @@ impl Store {
             if pending_index.versions.is_empty() {
                 self.pending.delete(&index_rel)?;
             } else {
-                self.save_index_to(&*self.pending, &pending_index)?;
+                self.pending.upload(&index_rel, &serde_json::to_vec_pretty(&pending_index)?)?;
             }
             self.pending.delete(&zip_rel)?;
             flushed.push(version.id);
@@ -450,12 +482,14 @@ impl Store {
     /// Finds which provider (primary or pending) currently holds a version.
     fn locate(&self, app_id: u64, version_id: &str) -> Result<(&dyn Provider, Index)> {
         // An unreachable primary here just means "not found there" — still
-        // check pending rather than treating it as a hard failure; only
-        // bail if the version genuinely isn't on either.
-        if let Ok(Some(index)) = self.load_index_from(&*self.primary, app_id) {
-            if index.versions.iter().any(|v| v.id == version_id) {
+        // check pending; only bail if the version genuinely isn't on either.
+        match self.load_index_from(&*self.primary, app_id) {
+            Ok(Some(index)) if index.versions.iter().any(|v| v.id == version_id) => {
                 return Ok((&*self.primary, index));
             }
+            Ok(_) => {}
+            Err(err) if crate::provider::is_offline(&err) => {}
+            Err(err) => return Err(err),
         }
         if let Some(index) = self.load_index_from(&*self.pending, app_id)? {
             if index.versions.iter().any(|v| v.id == version_id) {
@@ -466,24 +500,28 @@ impl Store {
     }
 
     pub fn set_pinned(&self, app_id: u64, version_id: &str, pinned: bool) -> Result<()> {
-        let (provider, mut index) = self.locate(app_id, version_id)?;
-        let version = index
-            .versions
-            .iter_mut()
-            .find(|v| v.id == version_id)
-            .expect("locate just confirmed this version is present");
-        version.pinned = pinned;
-        self.save_index_to(provider, &index)
+        let (provider, index) = self.locate(app_id, version_id)?;
+        self.update_index(provider, app_id, &index.game, |index| {
+            let version = index
+                .versions
+                .iter_mut()
+                .find(|v| v.id == version_id)
+                .with_context(|| format!("version {version_id} not found"))?;
+            version.pinned = pinned;
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Manual deletion (D5: pinned conflict versions live until the user
     /// deletes them).
     pub fn remove_version(&self, app_id: u64, version_id: &str) -> Result<()> {
-        let (provider, mut index) = self.locate(app_id, version_id)?;
-        let zip_rel = format!("{}/versions/{version_id}.zip", self.game_base(app_id));
-        provider.delete(&zip_rel)?;
-        index.versions.retain(|v| v.id != version_id);
-        self.save_index_to(provider, &index)
+        let (provider, index) = self.locate(app_id, version_id)?;
+        self.update_index(provider, app_id, &index.game, |index| {
+            index.versions.retain(|v| v.id != version_id);
+            Ok(())
+        })?;
+        provider.delete(&format!("{}/versions/{version_id}.zip", self.game_base(app_id)))
     }
 
     /// Copies one game's cloud versions from another account's store into
@@ -497,40 +535,37 @@ impl Store {
         let Some(src) = source.load_index_from(&*source.primary, app_id)? else {
             return Ok(0);
         };
-        let mut dest = self.load_index_from(&*self.primary, app_id)?.unwrap_or_else(|| Index {
-            schema: src.schema,
-            game: src.game.clone(),
-            app_id,
-            versions: Vec::new(),
-        });
-        let heads = (Store::head(&dest).cloned(), Store::head(&src).cloned());
-        let mut copied = 0;
-        for version in &src.versions {
-            if dest.versions.iter().any(|d| d.id == version.id) {
-                continue;
+        let existing = self.load_index_from(&*self.primary, app_id)?.map(|i| i.versions).unwrap_or_default();
+        let missing: Vec<&Version> = src.versions.iter().filter(|v| !existing.iter().any(|d| d.id == v.id)).collect();
+        if dry_run || missing.is_empty() {
+            return Ok(missing.len());
+        }
+        for version in &missing {
+            let from = format!("{}/versions/{}.zip", source.game_base(app_id), version.id);
+            let to = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
+            let bytes = source.primary.download(&from)?;
+            self.primary.upload(&to, &bytes)?;
+            if self.primary.download(&to)? != bytes {
+                anyhow::bail!("{}: copy of version {} doesn't match the original", src.game, version.id);
             }
-            if !dry_run {
-                let from = format!("{}/versions/{}.zip", source.game_base(app_id), version.id);
-                let to = format!("{}/versions/{}.zip", self.game_base(app_id), version.id);
-                let bytes = source.primary.download(&from)?;
-                self.primary.upload(&to, &bytes)?;
-                if self.primary.download(&to)? != bytes {
-                    anyhow::bail!("{}: copy of version {} doesn't match the original", src.game, version.id);
+        }
+        let theirs = Store::head(&src).cloned();
+        self.update_index(&*self.primary, app_id, &src.game, |dest| {
+            let ours = Store::head(dest).cloned();
+            for version in &missing {
+                if !dest.versions.iter().any(|d| d.id == version.id) {
+                    dest.versions.push((*version).clone());
                 }
             }
-            dest.versions.push(version.clone());
-            copied += 1;
-        }
-        if let (Some(ours), Some(theirs)) = heads {
-            let older = if ours.created <= theirs.created { ours.id } else { theirs.id };
-            if let Some(v) = dest.versions.iter_mut().find(|v| v.id == older) {
-                v.pinned = true;
+            if let (Some(ours), Some(theirs)) = (&ours, &theirs) {
+                let older = if ours.created <= theirs.created { &ours.id } else { &theirs.id };
+                if let Some(v) = dest.versions.iter_mut().find(|v| &v.id == older) {
+                    v.pinned = true;
+                }
             }
-        }
-        if !dry_run && copied > 0 {
-            self.save_index_to(&*self.primary, &dest)?;
-        }
-        Ok(copied)
+            Ok(())
+        })?;
+        Ok(missing.len())
     }
 
     /// Deletes one game's versions and index from this account's cloud.
@@ -542,7 +577,7 @@ impl Store {
         for version in &index.versions {
             self.primary.delete(&format!("{}/versions/{}.zip", self.game_base(app_id), version.id))?;
         }
-        self.primary.delete(&format!("{}/index.json", self.game_base(app_id)))
+        self.primary.delete(&self.index_rel(app_id))
     }
 
     /// Removes this account's (now empty) folder from the cloud, best effort.
@@ -568,19 +603,19 @@ mod tests {
 
     impl Provider for AlwaysFailProvider {
         fn exists(&self, _rel: &str) -> Result<bool> {
-            anyhow::bail!("simulated offline")
+            Err(crate::provider::Offline("simulated".into()).into())
         }
         fn download(&self, _rel: &str) -> Result<Vec<u8>> {
-            anyhow::bail!("simulated offline")
+            Err(crate::provider::Offline("simulated".into()).into())
         }
         fn upload(&self, _rel: &str, _bytes: &[u8]) -> Result<()> {
-            anyhow::bail!("simulated offline")
+            Err(crate::provider::Offline("simulated".into()).into())
         }
         fn delete(&self, _rel: &str) -> Result<()> {
-            anyhow::bail!("simulated offline")
+            Err(crate::provider::Offline("simulated".into()).into())
         }
         fn list(&self, _rel: &str) -> Result<Vec<String>> {
-            anyhow::bail!("simulated offline")
+            Err(crate::provider::Offline("simulated".into()).into())
         }
     }
 
@@ -800,6 +835,80 @@ mod tests {
         assert!(flaky.flush_pending(3, 10).unwrap().is_empty());
         fs::remove_dir_all(&primary_root).ok();
         fs::remove_dir_all(&pending_root).ok();
+    }
+
+    /// The local folder provider; just before its first conditional index
+    /// write, `meanwhile` runs (another machine writing the same index).
+    struct Racy {
+        inner: LocalFolderProvider,
+        meanwhile: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl Provider for Racy {
+        fn exists(&self, rel: &str) -> Result<bool> {
+            self.inner.exists(rel)
+        }
+        fn download(&self, rel: &str) -> Result<Vec<u8>> {
+            self.inner.download(rel)
+        }
+        fn upload(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+            self.inner.upload(rel, bytes)
+        }
+        fn delete(&self, rel: &str) -> Result<()> {
+            self.inner.delete(rel)
+        }
+        fn list(&self, rel: &str) -> Result<Vec<String>> {
+            self.inner.list(rel)
+        }
+        fn upload_if(&self, rel: &str, bytes: &[u8], expected: Option<&str>) -> Result<bool> {
+            if let Some(other_machine) = self.meanwhile.lock().unwrap().take() {
+                other_machine();
+            }
+            self.inner.upload_if(rel, bytes, expected)
+        }
+    }
+
+    #[test]
+    fn concurrent_index_writes_keep_both_versions() {
+        let cloud = scratch_dir("racy-cloud");
+        let pending = scratch_dir("racy-pending");
+        let plain = |dir: &PathBuf| Box::new(LocalFolderProvider::new(dir.clone()));
+        let base = Store::with_providers(plain(&cloud), plain(&pending), "acct".into());
+        base.push_raw(&test_version("Game", 5, b"base", "h0", "mac"), 10).unwrap();
+
+        let other = Store::with_providers(plain(&cloud), plain(&scratch_dir("racy-pending-2")), "acct".into());
+        let racy = Store::with_providers(
+            Box::new(Racy {
+                inner: LocalFolderProvider::new(cloud.clone()),
+                meanwhile: std::sync::Mutex::new(Some(Box::new(move || {
+                    other.push_raw(&test_version("Game", 5, b"other", "h-other", "linux"), 10).unwrap();
+                }))),
+            }),
+            plain(&pending),
+            "acct".into(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // distinct ids
+        racy.push_raw(&test_version("Game", 5, b"ours", "h-ours", "mac"), 10).unwrap();
+
+        let hashes: Vec<String> = base.load_index(5).unwrap().unwrap().versions.into_iter().map(|v| v.content_hash).collect();
+        for h in ["h0", "h-other", "h-ours"] {
+            assert!(hashes.iter().any(|x| x == h), "{h} missing from {hashes:?}");
+        }
+        fs::remove_dir_all(&cloud).ok();
+        fs::remove_dir_all(&pending).ok();
+    }
+
+    #[test]
+    fn a_damaged_cloud_index_is_an_error_not_an_empty_cloud() {
+        let cloud = scratch_dir("damaged");
+        let store = Store::with_providers(
+            Box::new(LocalFolderProvider::new(cloud.clone())),
+            Box::new(LocalFolderProvider::new(scratch_dir("damaged-pending"))),
+            "acct".into(),
+        );
+        LocalFolderProvider::new(cloud.clone()).upload("accounts/acct/games/9/index.json", b"{ not json").unwrap();
+        assert!(store.load_index(9).is_err());
+        fs::remove_dir_all(&cloud).ok();
     }
 
     #[test]
