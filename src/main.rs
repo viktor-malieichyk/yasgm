@@ -45,6 +45,7 @@ struct Ctx {
     manifest: manifest::Manifest,
     by_app_id: HashMap<u64, Vec<String>>,
     root: PathBuf,
+    libraries: Vec<PathBuf>,
     games: Vec<steam::InstalledGame>,
     account: String,
     os: Os,
@@ -64,7 +65,7 @@ fn load_ctx() -> Result<Ctx> {
     let libraries = steam::libraries(&root)?;
     let games = steam::installed_games(&libraries)?;
     let account = steam::current_account(&root).context("no Steam account found in userdata")?;
-    Ok(Ctx { manifest, by_app_id, root, games, account, os: Os::current() })
+    Ok(Ctx { manifest, by_app_id, root, libraries, games, account, os: Os::current() })
 }
 
 impl Ctx {
@@ -96,6 +97,43 @@ impl Ctx {
     fn cloud_store(&self) -> Result<Store> {
         build_store(self.account.clone(), &config::Config::load())
     }
+
+    /// How a game syncs: `Some(true)` backup-only, `Some(false)` two-way,
+    /// `None` not at all (mode off, or no save rules).
+    fn backup_only(&self, cfg: &config::Config, app_id: u64) -> Option<bool> {
+        let merged = self.merged_game(app_id)?;
+        match cfg.game(app_id).mode {
+            ModeOverride::Off => None,
+            ModeOverride::Sync => Some(false),
+            ModeOverride::Backup => Some(true),
+            ModeOverride::Auto => Some(self.auto_backup_only(app_id, &merged)),
+        }
+    }
+
+    /// Modification times of everything `load_ctx` reads (manifest, local
+    /// overrides, settings, Steam's account and library files, the
+    /// libraries' `steamapps` folders — installing a game changes those).
+    /// The daemon reloads when this changes.
+    fn inputs_fingerprint(&self) -> Vec<Option<std::time::SystemTime>> {
+        let mut paths = manifest::source_paths();
+        paths.extend(config::config_path());
+        paths.push(self.root.join("config/loginusers.vdf"));
+        paths.push(self.root.join("steamapps/libraryfolders.vdf"));
+        paths.extend(self.libraries.iter().map(|l| l.join("steamapps")));
+        paths.iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect()
+    }
+}
+
+/// Loads several games' indexes, eight requests at a time (one after
+/// another is slow on OneDrive; more than eight gets throttled).
+fn load_indexes(store: &Store, ids: &[u64]) -> Vec<(u64, Result<Option<store::Index>>)> {
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = ids
+            .chunks(ids.len().div_ceil(8).max(1))
+            .map(|chunk| scope.spawn(|| chunk.iter().map(|&id| (id, store.load_index(id))).collect::<Vec<_>>()))
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("index worker panicked")).collect()
+    })
 }
 
 /// Construct a `Store` over whichever provider (D8) the user has configured
@@ -781,7 +819,7 @@ fn pending_location_cmd(args: &[String]) -> Result<()> {
 fn sync_cmd(args: &[String]) -> Result<()> {
     let dry_run = flag(args, "--dry-run");
     let only = parse_app_id(args);
-    let failed = run_sync(only, dry_run)?.iter().filter(|e| e.kind == "error").count();
+    let failed = run_sync(&load_ctx()?, only, dry_run)?.iter().filter(|e| e.kind == "error").count();
     ensure!(failed == 0, "{failed} game(s) failed to sync (see above)");
     Ok(())
 }
@@ -804,10 +842,9 @@ impl SyncEvent {
     }
 }
 
-fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
+fn run_sync(ctx: &Ctx, only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
     // Waits for the daemon's (or another command's) sync; see lock.rs.
     let _op = if dry_run { None } else { Some(lock::acquire_operation()?) };
-    let ctx = load_ctx()?;
     let store = ctx.cloud_store()?;
     let cfg = config::Config::load();
     let mut state = config::State::load();
@@ -818,17 +855,11 @@ fn run_sync(only: Option<u64>, dry_run: bool) -> Result<Vec<SyncEvent>> {
             println!("{}: skipped (not in manifest)", game.name);
             continue;
         };
-        let game_cfg = cfg.game(game.app_id);
-        let backup_only = match game_cfg.mode {
-            ModeOverride::Off => {
-                println!("{}: skipped (mode off)", game.name);
-                continue;
-            }
-            ModeOverride::Sync => false,
-            ModeOverride::Backup => true,
-            ModeOverride::Auto => ctx.auto_backup_only(game.app_id, &merged),
+        let Some(backup_only) = ctx.backup_only(&cfg, game.app_id) else {
+            println!("{}: skipped (mode off)", game.name);
+            continue;
         };
-        let keep = game_cfg.keep.unwrap_or(store::DEFAULT_KEEP);
+        let keep = cfg.game(game.app_id).keep.unwrap_or(store::DEFAULT_KEEP);
         let last = state.get(&ctx.account, game.app_id);
         let job = sync::Job { store: &store, files: &merged.files, game, os: ctx.os, backup_only, keep, dry_run };
         let result = sync::sync_game(
@@ -953,14 +984,23 @@ fn run_cmd(args: &[String]) -> Result<()> {
         .or_else(|| std::env::var("SteamAppId").ok().and_then(|v| v.parse().ok()))
         .or_else(|| std::env::var("SteamGameId").ok().and_then(|v| v.parse().ok()));
 
-    match app_id {
-        Some(id) => {
+    let ctx = match app_id.map(|_| load_ctx()) {
+        Some(Ok(ctx)) => Some(ctx),
+        Some(Err(err)) => {
+            eprintln!("yasgm: can't sync (launching anyway): {err:#}");
+            None
+        }
+        None => None,
+    };
+    match (app_id, &ctx) {
+        (Some(id), Some(ctx)) => {
             eprintln!("yasgm: pre-launch sync (app {id})…");
-            if let Err(err) = run_sync(Some(id), false) {
+            if let Err(err) = run_sync(ctx, Some(id), false) {
                 eprintln!("yasgm: pre-launch sync failed (launching anyway): {err:#}");
             }
         }
-        None => eprintln!(
+        (Some(_), None) => {}
+        (None, _) => eprintln!(
             "yasgm: no app id (no SteamAppId in environment and no --app flag) — \
              launching without sync"
         ),
@@ -971,9 +1011,9 @@ fn run_cmd(args: &[String]) -> Result<()> {
         .status()
         .with_context(|| format!("launching {:?}", command[0]))?;
 
-    if let Some(id) = app_id {
+    if let (Some(id), Some(ctx)) = (app_id, &ctx) {
         eprintln!("yasgm: post-exit sync (app {id})…");
-        if let Err(err) = run_sync(Some(id), false) {
+        if let Err(err) = run_sync(ctx, Some(id), false) {
             eprintln!("yasgm: post-exit sync failed: {err:#}");
         }
     }
@@ -1140,14 +1180,14 @@ impl DaemonState {
 
 /// `run_sync` for the daemon: marked as in progress while it runs, then its
 /// events (or its failure) are logged.
-fn daemon_sync(state: &SharedState, only: Option<u64>) -> Result<()> {
+fn daemon_sync(state: &SharedState, ctx: &Ctx, only: Option<u64>) -> Result<()> {
     // Disconnected on purpose: nothing to sync, and nothing to report.
     if matches!(config::Config::load().provider, config::ProviderConfig::None) {
         return Ok(());
     }
     lock_state(state).syncing = Some(only);
     activity::set("checking");
-    let result = run_sync(only, false);
+    let result = run_sync(ctx, only, false);
     activity::set("");
     let mut state = lock_state(state);
     state.syncing = None;
@@ -1458,14 +1498,26 @@ fn watch_loop(
     use std::time::{Duration, Instant};
 
     const RESCAN_EVERY: Duration = Duration::from_secs(300);
+    /// How often to look for newer saves from other machines.
+    const CLOUD_CHECK_EVERY: Duration = Duration::from_secs(600);
+    /// How often to check whether games, settings or the manifest changed.
+    const RELOAD_CHECK_EVERY: Duration = Duration::from_secs(30);
+    /// Re-fetch the manifest (a conditional download) at least this often.
+    const MANIFEST_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
     let report = |line: &str| {
         if let Some(tx) = &status {
             let _ = tx.send(line.to_owned());
         }
     };
 
-    let ctx = load_ctx()?;
-    let cfg = config::Config::load();
+    // Tests shorten the cloud check (`YASGM_CLOUD_CHECK_SECS`).
+    let cloud_check_every = std::env::var("YASGM_CLOUD_CHECK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(CLOUD_CHECK_EVERY, Duration::from_secs);
+    let mut ctx = load_ctx()?;
+    let mut fingerprint = ctx.inputs_fingerprint();
+    let mut loaded_at = Instant::now();
 
     let state = SharedState::default();
     let control_state = state.clone();
@@ -1475,7 +1527,7 @@ fn watch_loop(
 
     println!("initial sync pass…");
     report("initial sync…");
-    if let Err(err) = daemon_sync(&state, None) {
+    if let Err(err) = daemon_sync(&state, &ctx, None) {
         eprintln!("initial sync failed (will keep watching): {err:#}");
     }
 
@@ -1483,7 +1535,7 @@ fn watch_loop(
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = tx.send(event);
     })?;
-    let mut roots = watch_roots(&ctx, &cfg);
+    let mut roots = watch_roots(&ctx, &config::Config::load());
     let mut registered = HashMap::new();
     for root in &roots {
         register_watches(&mut watcher, &mut registered, root);
@@ -1501,6 +1553,8 @@ fn watch_loop(
     let mut detector = running::RunningDetector::new();
     let mut session = GameSession::new(detector.poll(&ctx.root, &ctx.games));
     let mut last_rescan = Instant::now();
+    let mut last_reload_check = Instant::now();
+    let mut last_cloud_check = Instant::now();
     let mut paused = false;
     // The loop's view, for `status` over the control socket.
     let publish = |dirty: &HashMap<u64, Instant>, paused: bool, running_game: Option<u64>| {
@@ -1556,7 +1610,7 @@ fn watch_loop(
                 }
                 WatchCommand::Sync(target) => {
                     report("syncing…");
-                    match daemon_sync(&state, target) {
+                    match daemon_sync(&state, &ctx, target) {
                         Ok(()) => report("synced (manual)"),
                         Err(err) => {
                             eprintln!("manual sync failed: {err:#}");
@@ -1578,7 +1632,7 @@ fn watch_loop(
                         // pull newer cloud saves before it reads them.
                         if !paused {
                             println!("Steam reports app {app_id} starting — syncing it first");
-                            if let Err(err) = daemon_sync(&state, Some(app_id)) {
+                            if let Err(err) = daemon_sync(&state, &ctx, Some(app_id)) {
                                 eprintln!("pre-launch sync of {app_id} failed: {err:#}");
                             }
                             dirty.remove(&app_id);
@@ -1607,7 +1661,7 @@ fn watch_loop(
             if !paused {
                 println!("app {prev} exited — syncing");
                 report("game exited — syncing…");
-                match daemon_sync(&state, Some(prev)) {
+                match daemon_sync(&state, &ctx, Some(prev)) {
                     Ok(()) => report("synced after game exit"),
                     Err(err) => {
                         eprintln!("sync after exit of {prev} failed: {err:#}");
@@ -1629,7 +1683,7 @@ fn watch_loop(
             for app_id in settled {
                 println!("saves settled for app {app_id} — syncing");
                 report("saves changed — syncing…");
-                match daemon_sync(&state, Some(app_id)) {
+                match daemon_sync(&state, &ctx, Some(app_id)) {
                     Ok(()) => report("synced"),
                     Err(err) => {
                         eprintln!("sync of {app_id} failed: {err:#}");
@@ -1641,18 +1695,92 @@ fn watch_loop(
         }
         publish(&dirty, paused, running_now);
 
+        // Newer saves from other machines (otherwise only seen at startup
+        // and, on the Deck, before a game launches).
+        if !paused && last_cloud_check.elapsed() >= cloud_check_every {
+            last_cloud_check = Instant::now();
+            match cloud_changed_games(&ctx, running_now) {
+                Ok(ids) => {
+                    for app_id in ids {
+                        println!("newer saves in the cloud for app {app_id} — syncing");
+                        report("newer saves in the cloud — syncing…");
+                        if let Err(err) = daemon_sync(&state, &ctx, Some(app_id)) {
+                            eprintln!("sync of {app_id} failed: {err:#}");
+                        }
+                        dirty.remove(&app_id);
+                    }
+                    publish(&dirty, paused, running_now);
+                }
+                Err(err) => eprintln!("cloud check skipped: {err:#}"),
+            }
+        }
+
+        // Games installed or removed, settings changed (a mode set to off),
+        // another Steam account, a newer manifest: reload what we work from.
+        let mut reloaded = false;
+        if last_reload_check.elapsed() >= RELOAD_CHECK_EVERY {
+            last_reload_check = Instant::now();
+            let now = ctx.inputs_fingerprint();
+            if now != fingerprint || loaded_at.elapsed() >= MANIFEST_MAX_AGE {
+                match load_ctx() {
+                    Ok(fresh) => {
+                        println!("games, settings or manifest changed — reloaded ({} games)", fresh.games.len());
+                        ctx = fresh;
+                        reloaded = true;
+                    }
+                    Err(err) => eprintln!("reload failed, keeping the previous game list: {err:#}"),
+                }
+                fingerprint = ctx.inputs_fingerprint();
+                loaded_at = Instant::now();
+            }
+        }
+
         // Pick up save dirs that didn't exist at startup (first-ever save).
-        if last_rescan.elapsed() >= RESCAN_EVERY {
+        if reloaded || last_rescan.elapsed() >= RESCAN_EVERY {
             last_rescan = Instant::now();
-            let fresh = watch_roots(&ctx, &cfg);
+            let fresh = watch_roots(&ctx, &config::Config::load());
             for root in fresh.iter().filter(|r| !roots.contains(r)) {
                 register_watches(&mut watcher, &mut registered, root);
                 println!("now watching {} (app {})", root.root.display(), root.app_id);
             }
             roots = fresh;
+            let n_games = roots.iter().map(|r| r.app_id).collect::<std::collections::HashSet<_>>().len();
+            lock_state(&state).watching_games = n_games;
         }
     }
     Ok(())
+}
+
+/// Two-way games (not running now) whose cloud head isn't what this machine
+/// last synced: another machine uploaded newer saves. One index request
+/// per game; games that can't be checked (offline) are skipped.
+fn cloud_changed_games(ctx: &Ctx, running: Option<u64>) -> Result<Vec<u64>> {
+    let cfg = config::Config::load();
+    if matches!(cfg.provider, config::ProviderConfig::None) {
+        return Ok(Vec::new());
+    }
+    let state = config::State::load();
+    // Backup-only games never download automatically; they're reported by
+    // the normal syncs, not every few minutes.
+    let ids: Vec<u64> = ctx
+        .games
+        .iter()
+        .map(|g| g.app_id)
+        .filter(|&id| Some(id) != running && ctx.backup_only(&cfg, id) == Some(false))
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = ctx.cloud_store()?;
+    Ok(load_indexes(&store, &ids)
+        .into_iter()
+        .filter_map(|(id, index)| {
+            let index = index.ok()??;
+            let head = Store::head(&index).filter(|h| !h.pending)?;
+            let last = state.get(&ctx.account, id).map(|s| s.last_hash.as_str());
+            (last != Some(head.content_hash.as_str())).then_some(id)
+        })
+        .collect())
 }
 
 /// Opt-in autostart at login (D11).
@@ -1884,17 +2012,13 @@ fn cloud_games_cmd(args: &[String]) -> Result<()> {
     let installed: std::collections::HashSet<u64> =
         steam::installed_games(&steam::libraries(&root)?)?.iter().map(|g| g.app_id).collect();
     let ids: Vec<u64> = store.cloud_app_ids()?.into_iter().filter(|id| !installed.contains(id)).collect();
-    // One request per game; a few at a time instead of one after another.
-    let indexes: Vec<store::Index> = std::thread::scope(|scope| {
-        let workers: Vec<_> = ids
-            .chunks(ids.len().div_ceil(8).max(1))
-            .map(|chunk| scope.spawn(|| chunk.iter().map(|&id| store.load_index(id)).collect::<Vec<_>>()))
-            .collect();
-        workers.into_iter().flat_map(|w| w.join().expect("index worker panicked")).collect::<Result<Vec<_>>>()
-    })?
-    .into_iter()
-    .flatten()
-    .collect();
+    let indexes: Vec<store::Index> = load_indexes(&store, &ids)
+        .into_iter()
+        .map(|(_, index)| index)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let mut out = Vec::new();
     for index in indexes {
         let app_id = index.app_id;

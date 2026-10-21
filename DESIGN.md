@@ -1601,6 +1601,31 @@ below; they're fixed one by one, in this order. Status inline.
 9. **Pruned zips were deleted before the index was saved — FIXED.**
    `apply_retention` only edits the index; the zips go after the index is
    written, so a failure leaves unreferenced zips, never dangling entries.
+5. **The daemon never looked for newer cloud saves while running — FIXED.**
+   Every 10 min (`YASGM_CLOUD_CHECK_SECS` overrides, for tests) it loads
+   the index of each two-way game that isn't running (8 at a time, shared
+   `load_indexes` with `cloud-games`) and syncs those whose head isn't
+   what state.json last recorded. Backup-only games are skipped (they never
+   download automatically, and would toast every check). Not done: syncing
+   when process detection sees a game start — by then the game is already
+   reading its saves; the periodic check plus the Deck's pre-launch sync
+   cover it.
+6. **Status timed out during a pre-launch sync — FIXED.** The control
+   socket answers each connection on its own thread. Verified: with the
+   sync lock held, `game-started` waited 13 s while `status` answered in
+   0.04 s (`sync_phase: "waiting"`).
+8. **The daemon never noticed new games or settings — FIXED.** `run_sync`
+   takes the caller's `Ctx`; the daemon keeps one and reloads it when the
+   modification times of its inputs change (manifest cache, local
+   overrides, config.json, loginusers.vdf, libraryfolders.vdf, each
+   library's `steamapps` folder), checked every 30 s, and at least daily
+   (manifest refresh). Watch roots and the watched-games count follow.
+   Each daemon sync no longer re-fetches and re-parses the 17 MB manifest.
+   Verified with two fake machines (`scripts/fake-machines.sh`: separate
+   HOMEs, a made-up Steam game, a shared local-folder cloud): B pulled A's
+   new save within the check interval; a game "installed" on B while its
+   daemon ran was picked up within 30 s, watched and uploaded; the
+   download didn't trigger a re-upload.
 13. **Restores weren't crash-safe; partial restores re-uploaded — FIXED.**
     `extract` writes each file via temp + rename (`fsutil`). After every
     download/restore the local files are re-hashed; if they differ from the
@@ -1615,10 +1640,8 @@ below; they're fixed one by one, in this order. Status inline.
     must be plain relative names (no `..`, root, drive, `:` or backslash),
     and a recorded wildcard value must be one plain segment.
 
-Remaining from the review, in order: 5 (periodic cloud check in the
-daemon), 6 (control socket thread per connection), 17 (desktop app: HTML
-injection, CSP, `open_path`), 7 (machine name without `hostname`), 8
-(daemon reloads its game list/settings; no manifest re-parse per sync), 10
+Remaining from the review, in order: 17 (desktop app: HTML injection,
+CSP, `open_path`), 7 (machine name without `hostname`), 10
 (conditional index writes), 11 (cloud read errors vs. "no saves"), 12
 (OneDrive retries, token renewal, lazy token so offline backups work
 after the token expires), 15 (corrupt config/state files), 18 (signed

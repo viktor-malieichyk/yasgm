@@ -104,6 +104,11 @@ fn config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where `Config` lives.
+pub fn config_path() -> Option<PathBuf> {
+    config_dir().ok().map(|d| d.join("config.json"))
+}
+
 fn load_json<T: Default + for<'de> Deserialize<'de>>(name: &str) -> T {
     config_dir()
         .ok()

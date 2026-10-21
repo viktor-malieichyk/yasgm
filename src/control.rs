@@ -63,7 +63,7 @@ pub fn socket_path() -> Result<PathBuf> {
 /// call while holding the daemon lock: a leftover socket file from a
 /// crashed daemon is removed first.
 #[cfg(unix)]
-pub fn serve(handler: impl Fn(Request) -> String + Send + 'static) -> Result<()> {
+pub fn serve(handler: impl Fn(Request) -> String + Send + Sync + 'static) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
@@ -72,19 +72,25 @@ pub fn serve(handler: impl Fn(Request) -> String + Send + 'static) -> Result<()>
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let handler = std::sync::Arc::new(handler);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let mut line = String::new();
-            if BufReader::new(&stream).read_line(&mut line).is_err() {
-                continue;
-            }
-            let reply = match parse(&line) {
-                Ok(request) => handler(request),
-                Err(err) => format!("error: {err}"),
-            };
-            let _ = writeln!(stream, "{reply}");
+            // One thread per request: `game-started` waits for a sync, and
+            // `status` polls must still be answered meanwhile.
+            let handler = handler.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_err() {
+                    return;
+                }
+                let reply = match parse(&line) {
+                    Ok(request) => handler(request),
+                    Err(err) => format!("error: {err}"),
+                };
+                let _ = writeln!(stream, "{reply}");
+            });
         }
     });
     Ok(())
@@ -108,7 +114,7 @@ pub fn send(line: &str) -> Result<String> {
 }
 
 #[cfg(not(unix))]
-pub fn serve(_handler: impl Fn(Request) -> String + Send + 'static) -> Result<()> {
+pub fn serve(_handler: impl Fn(Request) -> String + Send + Sync + 'static) -> Result<()> {
     Ok(()) // no control socket on Windows; see module docs
 }
 

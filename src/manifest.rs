@@ -71,6 +71,12 @@ fn cache_dir() -> Result<PathBuf> {
 /// missing from the community manifest or entries that need extra/corrected
 /// paths — without waiting on a PCGamingWiki edit to land upstream. Absent
 /// by default; not an error if it doesn't exist.
+/// The files `load` reads: the cached community manifest and the local
+/// overrides (either may not exist).
+pub fn source_paths() -> Vec<PathBuf> {
+    [cache_dir().map(|d| d.join("manifest.yaml")), local_manifest_path()].into_iter().flatten().collect()
+}
+
 pub fn local_manifest_path() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("no config directory on this platform")?
