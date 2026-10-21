@@ -1654,8 +1654,13 @@ below; they're fixed one by one, in this order. Status inline.
     opens anything itself). Verified the app renders with the CSP (icons,
     version rows, styles).
 
-Remaining from the review, in order: 7 (machine name without
-`hostname`), 10
+7. **Every device without a `hostname` program was "machine" — FIXED.**
+   `machine_name` reads `COMPUTERNAME` (Windows), `/proc/sys/kernel/hostname`
+   or `/etc/hostname` (Linux), else runs `hostname` (macOS); cached. The
+   Deck will show up under its real name (usually `steamdeck`) from its next
+   upload; older versions keep "machine". Not yet run on SteamOS.
+
+Remaining from the review, in order: 10
 (conditional index writes), 11 (cloud read errors vs. "no saves"), 12
 (OneDrive retries, token renewal, lazy token so offline backups work
 after the token expires), 15 (corrupt config/state files), 18 (signed

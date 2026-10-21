@@ -111,12 +111,34 @@ fn timestamp_id(secs: u64) -> String {
     )
 }
 
+/// This device's name for version ids and the "from <machine>" labels.
+/// Asked of the OS directly: SteamOS has no `hostname` program, so every
+/// Deck used to be called "machine".
 pub fn machine_name() -> String {
-    let raw = std::process::Command::new("hostname")
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| sanitize_machine_name(&raw_machine_name())).clone()
+}
+
+fn raw_machine_name() -> String {
+    if cfg!(windows) {
+        return std::env::var("COMPUTERNAME").unwrap_or_default();
+    }
+    // Linux keeps it here; macOS has no such files and falls through.
+    for path in ["/proc/sys/kernel/hostname", "/etc/hostname"] {
+        if let Ok(name) = fs::read_to_string(path) {
+            if !name.trim().is_empty() {
+                return name;
+            }
+        }
+    }
+    std::process::Command::new("hostname")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn sanitize_machine_name(raw: &str) -> String {
     let name: String = raw
         .trim()
         .trim_end_matches(".local")
@@ -576,6 +598,15 @@ mod tests {
 
     fn test_version<'a>(game: &'a str, app_id: u64, bytes: &'a [u8], hash: &'a str, os: &'a str) -> NewVersion<'a> {
         NewVersion { game, app_id, bytes, content_hash: hash, files: 1, mounts: Vec::new(), os, saved_at: None, pinned: false }
+    }
+
+    #[test]
+    fn machine_names_are_safe_for_version_ids() {
+        assert_eq!(sanitize_machine_name("steamdeck\n"), "steamdeck");
+        assert_eq!(sanitize_machine_name("Viktors-MacBook-Pro.local"), "Viktors-MacBook-Pro");
+        assert_eq!(sanitize_machine_name("my pc/1"), "my-pc-1");
+        assert_eq!(sanitize_machine_name("  "), "machine");
+        assert_ne!(machine_name(), "machine", "this test machine has a name");
     }
 
     #[test]
