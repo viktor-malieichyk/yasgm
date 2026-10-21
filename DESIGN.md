@@ -1692,8 +1692,14 @@ below; they're fixed one by one, in this order. Status inline.
     warning is printed (it used to be read as empty and overwritten by the
     next save). Missing still means defaults; unreadable warns.
 
-Remaining from the review, in order: 18 (signed
-plugin updates), 19 (frozen game after a plugin crash), then code health
+19. **A game could stay frozen if the plugin died mid pre-launch — FIXED.**
+    The pids paused for a pre-launch sync are written to
+    `DECKY_PLUGIN_RUNTIME_DIR/frozen.json` before `SIGSTOP` and cleared after
+    `SIGCONT`; on start the backend resumes anything still listed (the
+    kernel only lets it signal its own processes). Tested on macOS with a
+    stopped `sleep` (T → S); not yet on SteamOS.
+
+Remaining from the review, in order: 18 (signed plugin updates), then code health
 (split `main.rs`, `backup` = sync without downloads, fewer
 `too_many_arguments`, logged instead of discarded errors, clock-skew
 warning).

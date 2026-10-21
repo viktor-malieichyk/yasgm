@@ -22,6 +22,10 @@ import decky
 
 BIN_DIR = os.path.join(decky.DECKY_PLUGIN_DIR, "bin")
 DAEMON_LOG = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "daemon.log")
+# Processes paused for a pre-launch sync, so a backend that dies (crash,
+# Decky restart, plugin update mid-launch) before resuming them doesn't
+# leave the game frozen: the next start resumes whatever is listed here.
+FROZEN_FILE = os.path.join(getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", decky.DECKY_PLUGIN_LOG_DIR), "frozen.json")
 # `yasgm watch` exits with this when another daemon already holds the lock
 # (e.g. one started from desktop mode); that one serves us just as well.
 ALREADY_RUNNING = 3
@@ -127,6 +131,32 @@ def signal_all(pids: list, sig) -> None:
             pass
 
 
+def remember_frozen(pids: list) -> None:
+    try:
+        if pids:
+            with open(FROZEN_FILE, "w") as f:
+                json.dump(pids, f)
+        elif os.path.exists(FROZEN_FILE):
+            os.remove(FROZEN_FILE)
+    except OSError as err:
+        decky.logger.warning(f"could not record paused processes: {err}")
+
+
+def resume_leftover_frozen() -> None:
+    """Resumes processes an earlier run paused and never resumed. SIGCONT
+    to a process that isn't stopped (or a reused pid of ours) is harmless."""
+    try:
+        with open(FROZEN_FILE) as f:
+            pids = [int(p) for p in json.load(f)]
+    except (OSError, ValueError, TypeError):
+        return
+    # The kernel only lets us signal our own processes.
+    signal_all(pids, signal.SIGCONT)
+    remember_frozen([])
+    if pids:
+        decky.logger.warning(f"resumed {len(pids)} process(es) an earlier run left paused")
+
+
 def plugin_version() -> str:
     version = getattr(decky, "DECKY_PLUGIN_VERSION", None)
     if not version:
@@ -228,6 +258,7 @@ class Plugin:
     # ---- daemon lifecycle -------------------------------------------------
 
     async def _main(self):
+        resume_leftover_frozen()
         self.stopping = False
         self.loop = asyncio.get_event_loop()
         self.loop.create_task(self._supervise_daemon())
@@ -419,6 +450,7 @@ class Plugin:
                 decky.logger.warning(f"could not forward game stop for {app_id}: {err}")
             return
         frozen = process_tree(pid) if pid > 1 else []
+        remember_frozen(frozen)
         signal_all(frozen, signal.SIGSTOP)
         try:
             reply = await ask_daemon(f"game-started {app_id}", timeout=170)
@@ -428,6 +460,7 @@ class Plugin:
             decky.logger.warning(f"could not forward game start for {app_id}: {err}")
         finally:
             signal_all(frozen, signal.SIGCONT)
+            remember_frozen([])
         if frozen:
             decky.logger.info(f"held {app_id} ({len(frozen)} processes) for its pre-launch sync")
 
