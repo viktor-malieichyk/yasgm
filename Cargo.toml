@@ -1,6 +1,6 @@
 [package]
 name = "yasgm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Yet another save game manager — seamless cloud sync for PC game saves"
 license = "MIT"

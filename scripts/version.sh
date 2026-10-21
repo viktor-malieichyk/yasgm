@@ -56,8 +56,11 @@ else:
     print(f"version set to {agreed(current())}")
 EOF
 
-# Cargo.lock records each crate's own version; refresh it for both crates.
+# The lockfiles record each package's own version too; refresh them.
 if [[ $# -eq 1 && "$1" != --check ]]; then
   cargo update --workspace --offline --manifest-path "$repo_root/Cargo.toml" >/dev/null 2>&1 || true
   cargo update --workspace --offline --manifest-path "$repo_root/ui/src-tauri/Cargo.toml" >/dev/null 2>&1 || true
+  for dir in ui decky; do
+    (cd "$repo_root/$dir" && npm install --package-lock-only --no-audit --no-fund >/dev/null 2>&1) || true
+  done
 fi
